@@ -1,0 +1,789 @@
+#region Using declarations
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.ComponentModel.DataAnnotations;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+using System.Windows;
+using System.Windows.Input;
+using System.Windows.Media;
+using System.Xml.Serialization;
+using NinjaTrader.Cbi;
+using NinjaTrader.Gui;
+using NinjaTrader.Gui.Chart;
+using NinjaTrader.Gui.SuperDom;
+using NinjaTrader.Gui.Tools;
+using NinjaTrader.Data;
+using NinjaTrader.NinjaScript;
+using NinjaTrader.Core.FloatingPoint;
+using NinjaTrader.NinjaScript.DrawingTools;
+#endregion
+
+namespace NinjaTrader.NinjaScript.Indicators
+{
+    public enum TiempoRangoEnum
+    {
+        [Description("5 minutos")]
+        Min5 = 5,
+        [Description("10 minutos")]
+        Min10 = 10,
+        [Description("15 minutos")]
+        Min15 = 15,
+        [Description("30 minutos")]
+        Min30 = 30,
+        [Description("1 hora")]
+        H1 = 60,
+        [Description("2 horas")]
+        H2 = 120,
+        [Description("4 horas")]
+        H4 = 240
+    }
+
+    public enum TendenciaEnum
+    {
+        Alcista,
+        Bajista,
+        Lateral,
+        Indefinida
+    }
+
+    public class RectanguloData
+    {
+        public DateTime InicioTiempo { get; set; }
+        public DateTime FinTiempo { get; set; }
+        public double MaxHigh { get; set; }
+        public double MinLow { get; set; }
+        public DateTime TiempoMaxHigh { get; set; }
+        public DateTime TiempoMinLow { get; set; }
+        public List<TouchPoint> TouchPoints { get; set; }
+        public TendenciaEnum Tendencia { get; set; }
+        public string RectangleTag { get; set; }
+        public string LineaPremiumTag { get; set; }
+        public double PrecioPremium { get; set; }
+        public bool LineaPremiumActiva { get; set; }
+        public bool LineaPremiumBloqueada { get; set; }
+        public DateTime TiempoBloqueo { get; set; }
+
+        public RectanguloData()
+        {
+            TouchPoints = new List<TouchPoint>();
+            MaxHigh = double.MinValue;
+            MinLow = double.MaxValue;
+            Tendencia = TendenciaEnum.Indefinida;
+            LineaPremiumActiva = false;
+            LineaPremiumBloqueada = false;
+        }
+    }
+
+    public class TouchPoint
+    {
+        public DateTime Tiempo { get; set; }
+        public bool EsMaximo { get; set; } // true = toca arriba, false = toca abajo
+        public double Valor { get; set; }
+    }
+
+    public class IndicadorVelaGuia : Indicator
+    {
+        private List<RectanguloData> rectangulos;
+        private RectanguloData rectanguloActual;
+        private int intervalMinutos;
+        private List<RectanguloData> lineasPremiumActivas;
+        private DateTime ultimaHoraLimpieza;
+
+        #region Properties
+
+        [NinjaScriptProperty]
+        [Display(Name = "Tiempo Rango", Description = "Intervalo de tiempo para el rectángulo", Order = 1, GroupName = "Configuración")]
+        public TiempoRangoEnum TiempoRango { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Iniciar en Hora", Description = "Si es true, alinea el rango con horas exactas", Order = 2, GroupName = "Configuración")]
+        public bool IniciarEnHora { get; set; }
+
+        [NinjaScriptProperty]
+        [XmlIgnore]
+        [Display(Name = "Color Borde", Description = "Color del borde del rectángulo", Order = 3, GroupName = "Apariencia")]
+        public Brush PincelBorde { get; set; }
+
+        [Browsable(false)]
+        public string PincelBordeSerializable
+        {
+            get { return Serialize.BrushToString(PincelBorde); }
+            set { PincelBorde = Serialize.StringToBrush(value); }
+        }
+
+        [NinjaScriptProperty]
+        [XmlIgnore]
+        [Display(Name = "Color Relleno", Description = "Color de relleno del rectángulo", Order = 4, GroupName = "Apariencia")]
+        public Brush PincelRelleno { get; set; }
+
+        [Browsable(false)]
+        public string PincelRellenoSerializable
+        {
+            get { return Serialize.BrushToString(PincelRelleno); }
+            set { PincelRelleno = Serialize.StringToBrush(value); }
+        }
+
+        [NinjaScriptProperty]
+        [Range(1, 5)]
+        [Display(Name = "Grosor Línea", Description = "Grosor de la línea del borde", Order = 5, GroupName = "Apariencia")]
+        public int GrosorLinea { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(10, 100)]
+        [Display(Name = "Opacidad Relleno", Description = "Opacidad del relleno (10-100)", Order = 6, GroupName = "Apariencia")]
+        public int OpacidadRelleno { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(1, 100)]
+        [Display(Name = "Distancia Premium (%)", Description = "Porcentaje de distancia para la línea premium", Order = 7, GroupName = "Premium")]
+        public int DistanciaPremium { get; set; }
+
+        [NinjaScriptProperty]
+        [XmlIgnore]
+        [Display(Name = "Color Línea Premium Alcista", Description = "Color de la línea premium para tendencia alcista", Order = 8, GroupName = "Premium")]
+        public Brush ColorLineaPremiumAlcista { get; set; }
+
+        [Browsable(false)]
+        public string ColorLineaPremiumAlcistaSerializable
+        {
+            get { return Serialize.BrushToString(ColorLineaPremiumAlcista); }
+            set { ColorLineaPremiumAlcista = Serialize.StringToBrush(value); }
+        }
+
+        [NinjaScriptProperty]
+        [XmlIgnore]
+        [Display(Name = "Color Línea Premium Bajista", Description = "Color de la línea premium para tendencia bajista", Order = 9, GroupName = "Premium")]
+        public Brush ColorLineaPremiumBajista { get; set; }
+
+        [Browsable(false)]
+        public string ColorLineaPremiumBajistaSerializable
+        {
+            get { return Serialize.BrushToString(ColorLineaPremiumBajista); }
+            set { ColorLineaPremiumBajista = Serialize.StringToBrush(value); }
+        }
+
+        [NinjaScriptProperty]
+        [XmlIgnore]
+        [Display(Name = "Color Línea Premium Lateral", Description = "Color de la línea premium para tendencia lateral/indefinida", Order = 10, GroupName = "Premium")]
+        public Brush ColorLineaPremiumLateral { get; set; }
+
+        [Browsable(false)]
+        public string ColorLineaPremiumLateralSerializable
+        {
+            get { return Serialize.BrushToString(ColorLineaPremiumLateral); }
+            set { ColorLineaPremiumLateral = Serialize.StringToBrush(value); }
+        }
+
+        [NinjaScriptProperty]
+        [Range(1, 5)]
+        [Display(Name = "Grosor Línea Premium", Description = "Grosor de la línea premium", Order = 11, GroupName = "Premium")]
+        public int GrosorLineaPremium { get; set; }
+
+        // Variables públicas para acceso externo
+        [Browsable(false)]
+        [XmlIgnore]
+        public double UltimoHighSuperior { get; private set; }
+
+        [Browsable(false)]
+        [XmlIgnore]
+        public double UltimoLowInferior { get; private set; }
+
+        [Browsable(false)]
+        [XmlIgnore]
+        public TendenciaEnum UltimaTendencia { get; private set; }
+		
+		[Browsable(false)]
+		[XmlIgnore]
+		public bool BloqueRecienFinalizado { get; private set; }
+
+		[Browsable(false)]
+		[XmlIgnore]
+		public DateTime TiempoUltimoBloqueFinalizado { get; private set; }
+
+        #endregion
+
+        protected override void OnStateChange()
+        {
+            if (State == State.SetDefaults)
+            {
+                Description = @"Indicador que dibuja rectángulos basados en intervalos de tiempo fijos";
+                Name = "IndicadorVelaGuia";
+                Calculate = Calculate.OnPriceChange;
+                IsOverlay = true;
+                DisplayInDataBox = true;
+                DrawOnPricePanel = true;
+                DrawHorizontalGridLines = true;
+                DrawVerticalGridLines = true;
+                PaintPriceMarkers = true;
+                ScaleJustification = NinjaTrader.Gui.Chart.ScaleJustification.Right;
+                IsSuspendedWhileInactive = true;
+
+                // Valores por defecto
+                TiempoRango = TiempoRangoEnum.Min30;
+                IniciarEnHora = true;
+                PincelBorde = Brushes.DodgerBlue;
+                PincelRelleno = Brushes.LightBlue;
+                GrosorLinea = 2;
+                OpacidadRelleno = 30;
+                DistanciaPremium = 30;
+                ColorLineaPremiumAlcista = Brushes.LimeGreen;      // Verde para alcista
+                ColorLineaPremiumBajista = Brushes.OrangeRed;      // Rojo para bajista
+                ColorLineaPremiumLateral = Brushes.Gold;           // Dorado para lateral/indefinida
+                GrosorLineaPremium = 2;
+
+                // Inicializar variables
+                UltimoHighSuperior = 0;
+                UltimoLowInferior = 0;
+                UltimaTendencia = TendenciaEnum.Indefinida;
+            }
+            else if (State == State.DataLoaded)
+            {
+                rectangulos = new List<RectanguloData>();
+                lineasPremiumActivas = new List<RectanguloData>();
+                intervalMinutos = (int)TiempoRango;
+                ultimaHoraLimpieza = DateTime.MinValue;
+            }
+        }
+
+        protected override void OnBarUpdate()
+        {
+            if (CurrentBar < 1)
+                return;
+			
+			BloqueRecienFinalizado = false;  // ← AGREGAR al inicio
+
+            DateTime tiempoActual = Time[0];
+
+            // Verificar líneas premium activas
+            VerificarLineasPremium();
+
+            // Verificar si es 4 PM New York para limpiar líneas (solo una vez por día)
+            VerificarCierreTrading(tiempoActual);
+
+            // Verificar si necesitamos crear un nuevo rectángulo
+            if (rectanguloActual == null || tiempoActual >= rectanguloActual.FinTiempo)
+            {
+                // Finalizar el rectángulo anterior si existe
+                if (rectanguloActual != null)
+                {
+                    FinalizarRectangulo();
+                }
+
+                // Crear nuevo rectángulo
+                CrearNuevoRectangulo(tiempoActual);
+            }
+
+            // Actualizar el rectángulo actual
+            ActualizarRectanguloActual();
+        }
+
+        private void CrearNuevoRectangulo(DateTime tiempoActual)
+        {
+            rectanguloActual = new RectanguloData();
+
+            if (IniciarEnHora)
+            {
+                // Alinear con horas exactas
+                rectanguloActual.InicioTiempo = AlinearTiempo(tiempoActual);
+            }
+            else
+            {
+                // Usar tiempo actual como inicio
+                rectanguloActual.InicioTiempo = tiempoActual;
+            }
+
+            rectanguloActual.FinTiempo = rectanguloActual.InicioTiempo.AddMinutes(intervalMinutos);
+            
+            Print($"Nuevo rectángulo creado: {rectanguloActual.InicioTiempo} - {rectanguloActual.FinTiempo}");
+        }
+
+        private DateTime AlinearTiempo(DateTime tiempo)
+        {
+            switch (TiempoRango)
+            {
+                case TiempoRangoEnum.Min5:
+                    return new DateTime(tiempo.Year, tiempo.Month, tiempo.Day, tiempo.Hour, (tiempo.Minute / 5) * 5, 0);
+                case TiempoRangoEnum.Min10:
+                    return new DateTime(tiempo.Year, tiempo.Month, tiempo.Day, tiempo.Hour, (tiempo.Minute / 10) * 10, 0);
+                case TiempoRangoEnum.Min15:
+                    return new DateTime(tiempo.Year, tiempo.Month, tiempo.Day, tiempo.Hour, (tiempo.Minute / 15) * 15, 0);
+                case TiempoRangoEnum.Min30:
+                    return new DateTime(tiempo.Year, tiempo.Month, tiempo.Day, tiempo.Hour, (tiempo.Minute / 30) * 30, 0);
+                case TiempoRangoEnum.H1:
+                    return new DateTime(tiempo.Year, tiempo.Month, tiempo.Day, tiempo.Hour, 0, 0);
+                case TiempoRangoEnum.H2:
+                    return new DateTime(tiempo.Year, tiempo.Month, tiempo.Day, (tiempo.Hour / 2) * 2, 0, 0);
+                case TiempoRangoEnum.H4:
+                    return new DateTime(tiempo.Year, tiempo.Month, tiempo.Day, (tiempo.Hour / 4) * 4, 0, 0);
+                default:
+                    return tiempo;
+            }
+        }
+
+        private void ActualizarRectanguloActual()
+        {
+            if (rectanguloActual == null)
+                return;
+
+            double high = High[0];
+            double low = Low[0];
+            DateTime tiempo = Time[0];
+
+            // Actualizar máximo
+            if (high > rectanguloActual.MaxHigh)
+            {
+                rectanguloActual.MaxHigh = high;
+                rectanguloActual.TiempoMaxHigh = tiempo;
+                UltimoHighSuperior = high;
+
+                // Agregar touch point
+                rectanguloActual.TouchPoints.Add(new TouchPoint
+                {
+                    Tiempo = tiempo,
+                    EsMaximo = true,
+                    Valor = high
+                });
+            }
+
+            // Actualizar mínimo
+            if (low < rectanguloActual.MinLow)
+            {
+                rectanguloActual.MinLow = low;
+                rectanguloActual.TiempoMinLow = tiempo;
+                UltimoLowInferior = low;
+
+                // Agregar touch point
+                rectanguloActual.TouchPoints.Add(new TouchPoint
+                {
+                    Tiempo = tiempo,
+                    EsMaximo = false,
+                    Valor = low
+                });
+            }
+
+            // Calcular tendencia
+            rectanguloActual.Tendencia = CalcularTendencia(rectanguloActual);
+            UltimaTendencia = rectanguloActual.Tendencia;
+        }
+
+        private TendenciaEnum CalcularTendencia(RectanguloData rectangulo)
+        {
+            // Verificar que tenemos datos válidos
+            if (rectangulo.MaxHigh == double.MinValue || rectangulo.MinLow == double.MaxValue)
+                return TendenciaEnum.Indefinida;
+
+            // Simplificar lógica de tendencia basada en cuándo ocurrieron máximos y mínimos
+            if (rectangulo.TiempoMaxHigh > rectangulo.TiempoMinLow)
+            {
+                // El máximo ocurrió después del mínimo = tendencia alcista
+                return TendenciaEnum.Alcista;
+            }
+            else if (rectangulo.TiempoMinLow > rectangulo.TiempoMaxHigh)
+            {
+                // El mínimo ocurrió después del máximo = tendencia bajista
+                return TendenciaEnum.Bajista;
+            }
+            else
+            {
+                // Ocurrieron al mismo tiempo o no hay datos suficientes
+                double rango = rectangulo.MaxHigh - rectangulo.MinLow;
+                double minRango = TickSize * 10; // Mínimo rango significativo
+                
+                if (rango < minRango)
+                    return TendenciaEnum.Lateral;
+                else
+                    return TendenciaEnum.Indefinida;
+            }
+        }
+
+        private void FinalizarRectangulo()
+        {
+            if (rectanguloActual == null)
+                return;
+
+            // Verificar que tenemos datos válidos
+            if (rectanguloActual.MaxHigh == double.MinValue || rectanguloActual.MinLow == double.MaxValue)
+            {
+                Print("Rectángulo sin datos válidos, no se finaliza");
+                return;
+            }
+
+            Print($"Finalizando rectángulo: {rectanguloActual.InicioTiempo} - {rectanguloActual.FinTiempo}");
+            Print($"MaxHigh: {rectanguloActual.MaxHigh}, MinLow: {rectanguloActual.MinLow}");
+            Print($"Tendencia: {rectanguloActual.Tendencia}");
+
+            // Calcular precio premium antes de dibujar
+            CalcularPrecioPremium(rectanguloActual);
+
+            // Dibujar el rectángulo
+            DibujarRectangulo(rectanguloActual);
+
+            // Dibujar línea premium - SIEMPRE dibujar si tenemos datos válidos
+            if (rectanguloActual.PrecioPremium > 0)
+            {
+                DibujarLineaPremium(rectanguloActual);
+                rectanguloActual.LineaPremiumActiva = true;
+                lineasPremiumActivas.Add(rectanguloActual);
+                Print($"Línea premium creada: Precio={rectanguloActual.PrecioPremium}, Tendencia={rectanguloActual.Tendencia}");
+            }
+            else
+            {
+                Print($"No se creó línea premium - PrecioPremium: {rectanguloActual.PrecioPremium}");
+            }
+			
+			// AL FINAL del método, ANTES de agregar a la lista:
+			BloqueRecienFinalizado = true;  // ← AGREGAR
+			TiempoUltimoBloqueFinalizado = Time[0];  // ← AGREGAR
+
+            // Agregar a la lista
+            rectangulos.Add(rectanguloActual);
+
+            // Limpiar rectangulos antiguos (mantener solo los últimos 50)
+            if (rectangulos.Count > 50)
+            {
+                var rectanguloPorBorrar = rectangulos[0];
+                if (!string.IsNullOrEmpty(rectanguloPorBorrar.RectangleTag))
+                    RemoveDrawObject(rectanguloPorBorrar.RectangleTag);
+                rectangulos.RemoveAt(0);
+            }
+        }
+
+        private void DibujarRectangulo(RectanguloData rectangulo)
+        {
+            if (rectangulo.MaxHigh == double.MinValue || rectangulo.MinLow == double.MaxValue)
+                return;
+
+            string tag = "VelaGuia_" + rectangulo.InicioTiempo.ToString("yyyyMMddHHmmss");
+            rectangulo.RectangleTag = tag;
+
+            // Crear brush con opacidad
+            Brush relleno = PincelRelleno.Clone();
+            relleno.Opacity = OpacidadRelleno / 100.0;
+
+            // Buscar barras por tiempo - mejorado
+            int inicioBar = BuscarBarraPorTiempo(rectangulo.InicioTiempo);
+            int finBar = BuscarBarraPorTiempo(rectangulo.FinTiempo);
+
+            Print($"Dibujando rectángulo - InicioBar: {inicioBar}, FinBar: {finBar}");
+
+            if (inicioBar >= 0 && finBar >= 0)
+            {
+                Draw.Rectangle(this, tag, false, // false para tiempo absoluto
+                    rectangulo.InicioTiempo, rectangulo.MinLow,
+                    rectangulo.FinTiempo, rectangulo.MaxHigh,
+                    PincelBorde, relleno, GrosorLinea);
+                    
+                Print($"Rectángulo dibujado: {tag}");
+            }
+            else
+            {
+                Print($"No se pudo dibujar rectángulo - barras no encontradas");
+            }
+        }
+
+        private int BuscarBarraPorTiempo(DateTime tiempoObjetivo)
+        {
+            // Buscar la barra más cercana al tiempo objetivo
+            int barraCercana = -1;
+            TimeSpan menorDiferencia = TimeSpan.MaxValue;
+            
+            for (int i = 0; i <= CurrentBar && i < Bars.Count; i++)
+            {
+                DateTime tiempoBarra = Time[CurrentBar - i];
+                TimeSpan diferencia = Math.Abs((tiempoBarra - tiempoObjetivo).Ticks) == (tiempoBarra - tiempoObjetivo).Ticks ? 
+                                     (tiempoBarra - tiempoObjetivo) : (tiempoObjetivo - tiempoBarra);
+                
+                if (diferencia < menorDiferencia)
+                {
+                    menorDiferencia = diferencia;
+                    barraCercana = CurrentBar - i;
+                }
+                
+                // Si encontramos una barra exacta o posterior, usar esa
+                if (tiempoBarra >= tiempoObjetivo)
+                {
+                    return CurrentBar - i;
+                }
+            }
+            
+            return barraCercana;
+        }
+
+        private void CalcularPrecioPremium(RectanguloData rectangulo)
+        {
+            if (rectangulo.MaxHigh == double.MinValue || rectangulo.MinLow == double.MaxValue)
+                return;
+
+            double rango = rectangulo.MaxHigh - rectangulo.MinLow;
+            double porcentaje = DistanciaPremium / 100.0;
+
+            Print($"Calculando precio premium - Tendencia: {rectangulo.Tendencia}, Rango: {rango:F5}, Porcentaje: {porcentaje:F2}");
+
+            switch (rectangulo.Tendencia)
+            {
+                case TendenciaEnum.Alcista:
+                    // Para tendencia alcista: % desde el punto más bajo hacia arriba
+                    rectangulo.PrecioPremium = rectangulo.MinLow + (rango * porcentaje);
+                    break;
+                case TendenciaEnum.Bajista:
+                    // Para tendencia bajista: % desde el punto más alto hacia abajo
+                    rectangulo.PrecioPremium = rectangulo.MaxHigh - (rango * porcentaje);
+                    break;
+                case TendenciaEnum.Lateral:
+                case TendenciaEnum.Indefinida:
+                default:
+                    // Para tendencia lateral o indefinida: punto medio
+                    rectangulo.PrecioPremium = rectangulo.MinLow + (rango * 0.5);
+                    break;
+            }
+            
+            Print($"PrecioPremium calculado: {rectangulo.PrecioPremium:F5}");
+        }
+
+        private void DibujarLineaPremium(RectanguloData rectangulo)
+        {
+            if (rectangulo.PrecioPremium <= 0)
+                return;
+
+            string tagLinea = "Premium_" + rectangulo.InicioTiempo.ToString("yyyyMMddHHmmss");
+            rectangulo.LineaPremiumTag = tagLinea;
+
+            // Dibujar línea desde el final del rectángulo hacia adelante
+            DateTime inicioLinea = rectangulo.FinTiempo;
+            DateTime finLinea = inicioLinea.AddMinutes(intervalMinutos * 10); // Extender 10 períodos
+
+            // Seleccionar color según la tendencia
+            Brush colorLinea = ObtenerColorPorTendencia(rectangulo.Tendencia);
+            
+            Print($"Dibujando línea premium: {tagLinea}, Precio: {rectangulo.PrecioPremium:F5}, Tendencia: {rectangulo.Tendencia}");
+            Print($"Desde: {inicioLinea} hasta: {finLinea}");
+
+            try
+            {
+                Draw.Line(this, tagLinea, false, // false para tiempo absoluto
+                    inicioLinea, rectangulo.PrecioPremium,
+                    finLinea, rectangulo.PrecioPremium,
+                    colorLinea, DashStyleHelper.Solid, GrosorLineaPremium);
+                    
+                Print($"Línea premium dibujada: {tagLinea} - Color: {rectangulo.Tendencia}");
+            }
+            catch (Exception ex)
+            {
+                Print($"Error dibujando línea premium: {ex.Message}");
+            }
+        }
+
+        private Brush ObtenerColorPorTendencia(TendenciaEnum tendencia)
+        {
+            switch (tendencia)
+            {
+                case TendenciaEnum.Alcista:
+                    return ColorLineaPremiumAlcista;
+                case TendenciaEnum.Bajista:
+                    return ColorLineaPremiumBajista;
+                case TendenciaEnum.Lateral:
+                case TendenciaEnum.Indefinida:
+                default:
+                    return ColorLineaPremiumLateral;
+            }
+        }
+
+        private void VerificarLineasPremium()
+        {
+            if (lineasPremiumActivas.Count == 0)
+                return;
+
+            var lineasParaProcesar = new List<RectanguloData>();
+
+            foreach (var rectangulo in lineasPremiumActivas.ToList())
+            {
+                if (!rectangulo.LineaPremiumActiva || rectangulo.LineaPremiumBloqueada)
+                    continue;
+
+                // Verificar si la vela actual toca la línea premium
+                double high = High[0];
+                double low = Low[0];
+                double precioPremium = rectangulo.PrecioPremium;
+
+                // Verificar si la vela toca la línea (con tolerancia)
+                double tolerancia = TickSize * 3;
+                
+                if (low <= precioPremium + tolerancia && high >= precioPremium - tolerancia)
+                {
+                    // La vela tocó la línea, bloquearla
+                    BloquearLineaPremium(rectangulo);
+                    Print($"Línea premium tocada y bloqueada: {rectangulo.LineaPremiumTag}");
+                }
+            }
+        }
+
+        private void VerificarCierreTrading(DateTime tiempoActual)
+        {
+            // Verificar solo una vez por día
+            if (ultimaHoraLimpieza.Date == tiempoActual.Date)
+                return;
+
+            // Convertir a hora New York aproximada
+            DateTime horaNewYork = ConvertirANewYork(tiempoActual);
+            
+            // Verificar si pasamos las 4:00 PM
+            if (horaNewYork.Hour >= 16 && ultimaHoraLimpieza.Date < tiempoActual.Date)
+            {
+                // Borrar todas las líneas premium activas
+                var lineasParaBorrar = new List<RectanguloData>(lineasPremiumActivas);
+                
+                foreach (var rectangulo in lineasParaBorrar)
+                {
+                    if (rectangulo.LineaPremiumActiva && !string.IsNullOrEmpty(rectangulo.LineaPremiumTag))
+                    {
+                        RemoveDrawObject(rectangulo.LineaPremiumTag);
+                        rectangulo.LineaPremiumActiva = false;
+                        Print($"Línea premium borrada por cierre: {rectangulo.LineaPremiumTag}");
+                    }
+                }
+                
+                lineasPremiumActivas.Clear();
+                ultimaHoraLimpieza = tiempoActual;
+                Print("Limpieza diaria de líneas premium completada");
+            }
+        }
+
+        private DateTime ConvertirANewYork(DateTime tiempoUTC)
+        {
+            // Aproximación simple: UTC-5 (EST) o UTC-4 (EDT)
+            DateTime horaNewYork = tiempoUTC.AddHours(-5); // EST por defecto
+            
+            // Verificar si estamos en horario de verano (aprox. marzo-noviembre)
+            if (tiempoUTC.Month >= 3 && tiempoUTC.Month <= 11)
+            {
+                horaNewYork = tiempoUTC.AddHours(-4); // EDT
+            }
+            
+            return horaNewYork;
+        }
+
+        private void BloquearLineaPremium(RectanguloData rectangulo)
+        {
+            rectangulo.LineaPremiumBloqueada = true;
+            rectangulo.TiempoBloqueo = Time[0];
+            
+            // Remover la línea actual
+            if (!string.IsNullOrEmpty(rectangulo.LineaPremiumTag))
+            {
+                RemoveDrawObject(rectangulo.LineaPremiumTag);
+            }
+            
+            // Crear línea bloqueada (desde inicio hasta el punto de toque)
+            DibujarLineaPremiumBloqueada(rectangulo);
+        }
+
+        private void DibujarLineaPremiumBloqueada(RectanguloData rectangulo)
+        {
+            DateTime inicioLinea = rectangulo.FinTiempo;
+            DateTime finLinea = rectangulo.TiempoBloqueo;
+            
+            if (finLinea > inicioLinea)
+            {
+                string tagLineaBloqueada = rectangulo.LineaPremiumTag + "_Bloqueada";
+                
+                // Usar el mismo color según la tendencia
+                Brush colorLinea = ObtenerColorPorTendencia(rectangulo.Tendencia);
+                
+                Draw.Line(this, tagLineaBloqueada, false,
+                    inicioLinea, rectangulo.PrecioPremium,
+                    finLinea, rectangulo.PrecioPremium,
+                    colorLinea, DashStyleHelper.Solid, GrosorLineaPremium);
+                    
+                Print($"Línea premium bloqueada dibujada: {tagLineaBloqueada} - Tendencia: {rectangulo.Tendencia}");
+            }
+        }
+
+        public override string DisplayName
+        {
+            get { return Name + " (" + TiempoRango.ToString() + ")"; }
+        }
+    }
+}
+
+#region NinjaScript generated code. Neither change nor remove.
+
+namespace NinjaTrader.NinjaScript.Indicators
+{
+    public partial class Indicator : NinjaTrader.Gui.NinjaScript.IndicatorRenderBase
+    {
+        private IndicadorVelaGuia[] cacheIndicadorVelaGuia;
+        public IndicadorVelaGuia IndicadorVelaGuia(TiempoRangoEnum tiempoRango, bool iniciarEnHora, Brush pincelBorde, Brush pincelRelleno, int grosorLinea, int opacidadRelleno, int distanciaPremium, Brush colorLineaPremiumAlcista, Brush colorLineaPremiumBajista, Brush colorLineaPremiumLateral, int grosorLineaPremium)
+        {
+            return IndicadorVelaGuia(Input, tiempoRango, iniciarEnHora, pincelBorde, pincelRelleno, grosorLinea, opacidadRelleno, distanciaPremium, colorLineaPremiumAlcista, colorLineaPremiumBajista, colorLineaPremiumLateral, grosorLineaPremium);
+        }
+
+        public IndicadorVelaGuia IndicadorVelaGuia(ISeries<double> input, TiempoRangoEnum tiempoRango, bool iniciarEnHora, Brush pincelBorde, Brush pincelRelleno, int grosorLinea, int opacidadRelleno, int distanciaPremium, Brush colorLineaPremiumAlcista, Brush colorLineaPremiumBajista, Brush colorLineaPremiumLateral, int grosorLineaPremium)
+        {
+            if (cacheIndicadorVelaGuia != null)
+                for (int idx = 0; idx < cacheIndicadorVelaGuia.Length; idx++)
+                    if (cacheIndicadorVelaGuia[idx] != null && 
+                        cacheIndicadorVelaGuia[idx].TiempoRango == tiempoRango && 
+                        cacheIndicadorVelaGuia[idx].IniciarEnHora == iniciarEnHora && 
+                        cacheIndicadorVelaGuia[idx].GrosorLinea == grosorLinea && 
+                        cacheIndicadorVelaGuia[idx].OpacidadRelleno == opacidadRelleno && 
+                        cacheIndicadorVelaGuia[idx].DistanciaPremium == distanciaPremium && 
+                        cacheIndicadorVelaGuia[idx].GrosorLineaPremium == grosorLineaPremium && 
+                        cacheIndicadorVelaGuia[idx].EqualsInput(input))
+                        return cacheIndicadorVelaGuia[idx];
+            return CacheIndicator<IndicadorVelaGuia>(new IndicadorVelaGuia(){ 
+                TiempoRango = tiempoRango, 
+                IniciarEnHora = iniciarEnHora, 
+                PincelBorde = pincelBorde, 
+                PincelRelleno = pincelRelleno, 
+                GrosorLinea = grosorLinea, 
+                OpacidadRelleno = opacidadRelleno, 
+                DistanciaPremium = distanciaPremium, 
+                ColorLineaPremiumAlcista = colorLineaPremiumAlcista, 
+                ColorLineaPremiumBajista = colorLineaPremiumBajista, 
+                ColorLineaPremiumLateral = colorLineaPremiumLateral, 
+                GrosorLineaPremium = grosorLineaPremium 
+            }, input, ref cacheIndicadorVelaGuia);
+        }
+    }
+}
+
+namespace NinjaTrader.NinjaScript.MarketAnalyzerColumns
+{
+    using NinjaTrader.NinjaScript.Indicators;
+    
+    public partial class MarketAnalyzerColumn : MarketAnalyzerColumnBase
+    {
+        public Indicators.IndicadorVelaGuia IndicadorVelaGuia(NinjaTrader.NinjaScript.Indicators.TiempoRangoEnum tiempoRango, bool iniciarEnHora, Brush pincelBorde, Brush pincelRelleno, int grosorLinea, int opacidadRelleno, int distanciaPremium, Brush colorLineaPremiumAlcista, Brush colorLineaPremiumBajista, Brush colorLineaPremiumLateral, int grosorLineaPremium)
+        {
+            return indicator.IndicadorVelaGuia(Input, tiempoRango, iniciarEnHora, pincelBorde, pincelRelleno, grosorLinea, opacidadRelleno, distanciaPremium, colorLineaPremiumAlcista, colorLineaPremiumBajista, colorLineaPremiumLateral, grosorLineaPremium);
+        }
+
+        public Indicators.IndicadorVelaGuia IndicadorVelaGuia(ISeries<double> input , NinjaTrader.NinjaScript.Indicators.TiempoRangoEnum tiempoRango, bool iniciarEnHora, Brush pincelBorde, Brush pincelRelleno, int grosorLinea, int opacidadRelleno, int distanciaPremium, Brush colorLineaPremiumAlcista, Brush colorLineaPremiumBajista, Brush colorLineaPremiumLateral, int grosorLineaPremium)
+        {
+            return indicator.IndicadorVelaGuia(input, tiempoRango, iniciarEnHora, pincelBorde, pincelRelleno, grosorLinea, opacidadRelleno, distanciaPremium, colorLineaPremiumAlcista, colorLineaPremiumBajista, colorLineaPremiumLateral, grosorLineaPremium);
+        }
+    }
+}
+
+namespace NinjaTrader.NinjaScript.Strategies
+{
+    using NinjaTrader.NinjaScript.Indicators;
+    
+    public partial class Strategy : NinjaTrader.Gui.NinjaScript.StrategyRenderBase
+    {
+        public Indicators.IndicadorVelaGuia IndicadorVelaGuia(NinjaTrader.NinjaScript.Indicators.TiempoRangoEnum tiempoRango, bool iniciarEnHora, Brush pincelBorde, Brush pincelRelleno, int grosorLinea, int opacidadRelleno, int distanciaPremium, Brush colorLineaPremiumAlcista, Brush colorLineaPremiumBajista, Brush colorLineaPremiumLateral, int grosorLineaPremium)
+        {
+            return indicator.IndicadorVelaGuia(Input, tiempoRango, iniciarEnHora, pincelBorde, pincelRelleno, grosorLinea, opacidadRelleno, distanciaPremium, colorLineaPremiumAlcista, colorLineaPremiumBajista, colorLineaPremiumLateral, grosorLineaPremium);
+        }
+
+        public Indicators.IndicadorVelaGuia IndicadorVelaGuia(ISeries<double> input , NinjaTrader.NinjaScript.Indicators.TiempoRangoEnum tiempoRango, bool iniciarEnHora, Brush pincelBorde, Brush pincelRelleno, int grosorLinea, int opacidadRelleno, int distanciaPremium, Brush colorLineaPremiumAlcista, Brush colorLineaPremiumBajista, Brush colorLineaPremiumLateral, int grosorLineaPremium)
+        {
+            return indicator.IndicadorVelaGuia(input, tiempoRango, iniciarEnHora, pincelBorde, pincelRelleno, grosorLinea, opacidadRelleno, distanciaPremium, colorLineaPremiumAlcista, colorLineaPremiumBajista, colorLineaPremiumLateral, grosorLineaPremium);
+        }
+    }
+}
+
+#endregion
