@@ -1,3 +1,5 @@
+// nueva version 
+
 #region Using declarations
 using System;
 using System.Collections.Generic;
@@ -785,5 +787,6 @@ namespace NinjaTrader.NinjaScript.Strategies
         }
     }
 }
+
 
 #endregion
