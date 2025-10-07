@@ -1,0 +1,1512 @@
+#region Using declarations
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.ComponentModel.DataAnnotations;
+using System.Linq;
+using System.Text;
+using System.Windows.Media;
+using System.Xml.Serialization;
+using NinjaTrader.Cbi;
+using NinjaTrader.Data;
+using NinjaTrader.Gui;
+using NinjaTrader.Gui.Chart;
+using NinjaTrader.NinjaScript;
+using NinjaTrader.NinjaScript.DrawingTools;
+using NinjaTrader.NinjaScript.Indicators;
+#endregion
+
+// ╔═══════════════════════════════════════════════════════════════════════════╗
+// ║          ESTRATEGIA VELA GUIA DINÁMICA - ZONAS RECALCULADAS              ║
+// ║                 PARTE 1 DE 2: CLASES Y PROPIEDADES                        ║
+// ╚═══════════════════════════════════════════════════════════════════════════╝
+
+namespace NinjaTrader.NinjaScript.Strategies
+{
+    // ========== CLASES EXCLUSIVAS DE ESTRATEGIA DINÁMICA ==========
+    
+    public class SenalOperacionDin
+    {
+        public int Id { get; set; }
+        public DateTime Fecha { get; set; }
+        public int ZonaId { get; set; }
+        public bool EsAlcista { get; set; }
+        public double PrecioSenal { get; set; }
+        public int BarIndex { get; set; }
+        public string TagFlecha { get; set; }
+        
+        public int VelasAlcistasPrevias { get; set; }
+        public int VelasBajistasPrevias { get; set; }
+        public bool PatronCompleto { get; set; }
+        public bool OperacionEjecutada { get; set; }
+    }
+
+    public class OperacionActivaDin
+    {
+        public int Id { get; set; }
+        public DateTime FechaApertura { get; set; }
+        public bool EsAlcista { get; set; }
+        public double PrecioEntrada { get; set; }
+        public int ContratosTotal { get; set; }
+        public int ContratosTP1 { get; set; }
+        public int ContratosTP2 { get; set; }
+        
+        public double PrecioStopLoss { get; set; }
+        public double PrecioTP1 { get; set; }
+        public double PrecioTP2 { get; set; }
+        
+        public int EstadoOp { get; set; } // 0=Abierta, 1=TP1, 2=TP2, 3=StopLoss, 4=Cerrada
+        public bool TP1Ejecutado { get; set; }
+        public bool TrailingActivo { get; set; }
+        public double UltimoStopTrailing { get; set; }
+        
+        public int ZonaId { get; set; }
+        public int SenalId { get; set; }
+        
+        public Order OrdenEntradaTP1 { get; set; }
+        public Order OrdenEntradaTP2 { get; set; }
+        
+        public bool OrdenTP1Llena { get; set; }
+        public bool OrdenTP2Llena { get; set; }
+    }
+
+    public class ZonaDinamica
+    {
+        public int Id { get; set; }
+        public DateTime FechaCreacion { get; set; }
+        public DateTime FechaUltimaActualizacion { get; set; }
+        public DateTime FechaExpiracion { get; set; }
+        public bool EsAlcista { get; set; }
+        public int EstadoZ { get; set; } // 0=Activa, 1=Recalculada, 2=Cancelada, 3=Expirada
+        
+        public double LimiteInferior { get; set; }
+        public double LimiteSuperior { get; set; }
+        
+        public int BloqueInicialId { get; set; }
+        public int BloqueActualId { get; set; }
+        
+        public double PuntoExtremo { get; set; }
+        public double PuntoActual { get; set; }
+        
+        public int NumeroRecalculos { get; set; }
+        public List<RecalculoDin> Recalculos { get; set; }
+        public List<SenalOperacionDin> Senales { get; set; }
+        
+        public string TagVisualizacion { get; set; }
+        
+        public ZonaDinamica()
+        {
+            Recalculos = new List<RecalculoDin>();
+            Senales = new List<SenalOperacionDin>();
+            EstadoZ = 0; // Activa
+            NumeroRecalculos = 0;
+        }
+        
+        public bool PrecioEnZona(double precio)
+        {
+            return precio >= LimiteInferior && precio <= LimiteSuperior;
+        }
+        
+        public bool SeSuperpone(ZonaDinamica otraZona)
+        {
+            return !(LimiteSuperior < otraZona.LimiteInferior || LimiteInferior > otraZona.LimiteSuperior);
+        }
+        
+        public bool EstaExpirada(DateTime tiempoActual)
+        {
+            return tiempoActual >= FechaExpiracion;
+        }
+    }
+
+    public class RecalculoDin
+    {
+        public DateTime Fecha { get; set; }
+        public int BloqueId { get; set; }
+        public double LimiteInferiorAnterior { get; set; }
+        public double LimiteSuperiorAnterior { get; set; }
+        public double LimiteInferiorNuevo { get; set; }
+        public double LimiteSuperiorNuevo { get; set; }
+        public string Motivo { get; set; }
+    }
+
+    public class BloqueDin
+    {
+        public int NumeroBloque { get; set; }
+        public DateTime Inicio { get; set; }
+        public DateTime Fin { get; set; }
+        public double High { get; set; }
+        public double Low { get; set; }
+        public DateTime TiempoHigh { get; set; }
+        public DateTime TiempoLow { get; set; }
+        public bool EsAlcista { get; set; }
+        public string TagRectangulo { get; set; }
+    }
+
+    public partial class EstrategiaVelaGuiaDinamica : Strategy
+    {
+        #region Variables
+        private List<ZonaDinamica> zonasActivasDin;
+        private List<BloqueDin> historialBloquesDin;
+        private BloqueDin bloqueActualDin;
+        private BloqueDin bloqueAnteriorDin;
+        
+        private int contadorZonasDin = 0;
+        private int contadorBloquesDin = 0;
+        private int contadorSenalesDin = 0;
+        private int contadorOperacionesDin = 0;
+        private int intervalMinutosDin;
+        private DateTime ultimoLogDin;
+        
+        private OperacionActivaDin operacionActualDin;
+        private bool operacionEnCursoDin = false;
+        
+        private int ultimaBarraProcesadaDin = -1;
+        
+        private EMA emaFiltroD;
+        #endregion
+
+        #region Properties
+        [NinjaScriptProperty]
+        [Display(Name = "Intervalo Bloque (minutos)", Order = 1, GroupName = "1. Configuración Bloques")]
+        public int IntervaloBloqueD { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Iniciar en Hora Exacta", Order = 2, GroupName = "1. Configuración Bloques")]
+        public bool IniciarEnHoraD { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(1, 100)]
+        [Display(Name = "Umbral Zona Premium (%)", Order = 3, GroupName = "2. Zona Premium Dinámica")]
+        public int UmbralZonaPctD { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Cancelar por Superposición", Order = 4, GroupName = "2. Zona Premium Dinámica")]
+        public bool CancelarPorSuperposicionD { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(30, 10080)]
+        [Display(Name = "Duración Máxima Zona (minutos)", Order = 5, GroupName = "2. Zona Premium Dinámica")]
+        public int DuracionMaximaZonaMinutosD { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Limpiar Zonas Expiradas", Order = 6, GroupName = "2. Zona Premium Dinámica")]
+        public bool LimpiarZonasExpiradasD { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(1, 10)]
+        [Display(Name = "Velas Alcistas (Patrón Bajista)", Order = 7, GroupName = "3. Patrones de Reversión")]
+        public int NVelasAlcistasPatronBajistaD { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(1, 10)]
+        [Display(Name = "Velas Bajistas (Patrón Bajista)", Order = 8, GroupName = "3. Patrones de Reversión")]
+        public int NVelasBajistasPatronBajistaD { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(1, 10)]
+        [Display(Name = "Velas Bajistas (Patrón Alcista)", Order = 9, GroupName = "3. Patrones de Reversión")]
+        public int NVelasBajistasPatronAlcistaD { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(1, 10)]
+        [Display(Name = "Velas Alcistas (Patrón Alcista)", Order = 10, GroupName = "3. Patrones de Reversión")]
+        public int NVelasAlcistasPatronAlcistaD { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Activar Detección Patrones", Order = 11, GroupName = "3. Patrones de Reversión")]
+        public bool ActivarDeteccionPatronesD { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Activar Trading Automático", Order = 12, GroupName = "4. Gestión de Operaciones")]
+        public bool ActivarTradingD { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(1, 100)]
+        [Display(Name = "Contratos Totales", Order = 13, GroupName = "4. Gestión de Operaciones")]
+        public int ContratosTotalD { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(1, 100)]
+        [Display(Name = "Porcentaje TP1 (%)", Order = 14, GroupName = "4. Gestión de Operaciones")]
+        public int PorcentajeTP1D { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(1, 1000)]
+        [Display(Name = "Stop Loss (ticks)", Order = 15, GroupName = "4. Gestión de Operaciones")]
+        public int StopLossTicksD { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(1, 1000)]
+        [Display(Name = "Take Profit 1 (ticks)", Order = 16, GroupName = "4. Gestión de Operaciones")]
+        public int TakeProfit1TicksD { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Usar TP2", Order = 17, GroupName = "4. Gestión de Operaciones")]
+        public bool UsarTP2D { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(1, 10)]
+        [Display(Name = "Relación R:R para TP2 (1:X)", Order = 18, GroupName = "4. Gestión de Operaciones")]
+        public int RelacionRiesgoTP2D { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Activar Trailing Stop", Order = 19, GroupName = "5. Trailing Stop")]
+        public bool ActivarTrailingStopD { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(1, 500)]
+        [Display(Name = "Distancia Activación (ticks)", Order = 20, GroupName = "5. Trailing Stop")]
+        public int TrailingActivacionTicksD { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(1, 500)]
+        [Display(Name = "Distancia Movimiento (ticks)", Order = 21, GroupName = "5. Trailing Stop")]
+        public int TrailingMovimientoTicksD { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Logs Detallados", Order = 22, GroupName = "6. Debug")]
+        public bool LogsDetalladosD { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Logs cada X minutos", Order = 23, GroupName = "6. Debug")]
+        public int FrecuenciaLogMinutosD { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Logs de Zonas", Order = 24, GroupName = "6. Debug")]
+        public bool LogsZonasD { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Logs de Patrones", Order = 25, GroupName = "6. Debug")]
+        public bool LogsPatronesD { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Logs de Operaciones", Order = 26, GroupName = "6. Debug")]
+        public bool LogsOperacionesD { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Dibujar Bloques", Order = 27, GroupName = "7. Visualización")]
+        public bool DibujarBloquesD { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Dibujar Zonas Premium", Order = 28, GroupName = "7. Visualización")]
+        public bool DibujarZonasPremiumD { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Dibujar Señales", Order = 29, GroupName = "7. Visualización")]
+        public bool DibujarSenalesD { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(10, 200)]
+        [Display(Name = "Máximo Bloques Visibles", Order = 30, GroupName = "7. Visualización")]
+        public int MaximoBloquesD { get; set; }
+        
+        [NinjaScriptProperty]
+        [Display(Name = "Activar Filtro EMA", Order = 31, GroupName = "8. Filtro de Tendencia")]
+        public bool ActivarFiltroEMAD { get; set; }
+        
+        [NinjaScriptProperty]
+        [Range(1, 1000)]
+        [Display(Name = "Periodo EMA", Order = 32, GroupName = "8. Filtro de Tendencia")]
+        public int PeriodoEMAD { get; set; }
+        
+        [NinjaScriptProperty]
+        [Range(1, 100)]
+        [Display(Name = "Tolerancia EMA (ticks)", Order = 33, GroupName = "8. Filtro de Tendencia")]
+        public int ToleranciaEMATicksD { get; set; }
+        
+        [NinjaScriptProperty]
+        [Display(Name = "Dibujar EMA", Order = 34, GroupName = "8. Filtro de Tendencia")]
+        public bool DibujarEMAD { get; set; }
+        #endregion
+    }
+}
+// ╔═══════════════════════════════════════════════════════════════════════════╗
+// ║          ESTRATEGIA VELA GUIA DINÁMICA - ZONAS RECALCULADAS              ║
+// ║              PARTE 2 DE 2: IMPLEMENTACIÓN COMPLETA                        ║
+// ╚═══════════════════════════════════════════════════════════════════════════╝
+
+namespace NinjaTrader.NinjaScript.Strategies
+{
+    public partial class EstrategiaVelaGuiaDinamica : Strategy
+    {
+        protected override void OnStateChange()
+        {
+            if (State == State.SetDefaults)
+            {
+                Description = @"Estrategia con zonas premium dinámicas recalculadas con expiración";
+                Name = "EstrategiaVelaGuiaDinamica";
+                
+                Calculate = Calculate.OnEachTick;
+                
+                EntriesPerDirection = 2;
+                EntryHandling = EntryHandling.AllEntries;
+                IsExitOnSessionCloseStrategy = true;
+                ExitOnSessionCloseSeconds = 30;
+                IsFillLimitOnTouch = false;
+                MaximumBarsLookBack = MaximumBarsLookBack.TwoHundredFiftySix;
+                OrderFillResolution = OrderFillResolution.Standard;
+                Slippage = 0;
+                StartBehavior = StartBehavior.WaitUntilFlat;
+                TimeInForce = TimeInForce.Gtc;
+                TraceOrders = false;
+                RealtimeErrorHandling = RealtimeErrorHandling.StopCancelClose;
+                StopTargetHandling = StopTargetHandling.PerEntryExecution;
+                BarsRequiredToTrade = 20;
+                IsInstantiatedOnEachOptimizationIteration = true;
+                
+                IntervaloBloqueD = 30;
+                IniciarEnHoraD = true;
+                UmbralZonaPctD = 30;
+                CancelarPorSuperposicionD = true;
+                DuracionMaximaZonaMinutosD = 1440;
+                LimpiarZonasExpiradasD = true;
+                
+                NVelasAlcistasPatronBajistaD = 3;
+                NVelasBajistasPatronBajistaD = 2;
+                NVelasBajistasPatronAlcistaD = 3;
+                NVelasAlcistasPatronAlcistaD = 2;
+                ActivarDeteccionPatronesD = true;
+                
+                ActivarTradingD = false;
+                ContratosTotalD = 2;
+                PorcentajeTP1D = 50;
+                StopLossTicksD = 20;
+                TakeProfit1TicksD = 30;
+                UsarTP2D = true;
+                RelacionRiesgoTP2D = 2;
+                
+                ActivarTrailingStopD = true;
+                TrailingActivacionTicksD = 15;
+                TrailingMovimientoTicksD = 10;
+                
+                LogsDetalladosD = true;
+                FrecuenciaLogMinutosD = 5;
+                LogsZonasD = true;
+                LogsPatronesD = true;
+                LogsOperacionesD = true;
+                
+                DibujarBloquesD = true;
+                DibujarZonasPremiumD = true;
+                DibujarSenalesD = true;
+                
+                MaximoBloquesD = 50;
+                
+                ActivarFiltroEMAD = false;
+                PeriodoEMAD = 500;
+                ToleranciaEMATicksD = 10;
+                DibujarEMAD = true;
+            }
+            else if (State == State.Configure)
+            {
+            }
+            else if (State == State.DataLoaded)
+            {
+                zonasActivasDin = new List<ZonaDinamica>();
+                historialBloquesDin = new List<BloqueDin>();
+                intervalMinutosDin = IntervaloBloqueD;
+                ultimoLogDin = DateTime.MinValue;
+                operacionEnCursoDin = false;
+                ultimaBarraProcesadaDin = -1;
+                bloqueAnteriorDin = null;
+                
+                if (ActivarFiltroEMAD)
+                {
+                    emaFiltroD = EMA(PeriodoEMAD);
+                    emaFiltroD.Plots[0].Brush = Brushes.Orange;
+                    emaFiltroD.Plots[0].Width = 2;
+                    
+                    if (DibujarEMAD)
+                    {
+                        AddChartIndicator(emaFiltroD);
+                    }
+                }
+                
+                LogEncabezadoDin();
+            }
+        }
+
+        protected override void OnBarUpdate()
+        {
+            if (CurrentBar < 2) return;
+
+            if (operacionEnCursoDin && operacionActualDin != null)
+            {
+                VerificarStopsYTargetsDin();
+            }
+
+            if (CurrentBar == ultimaBarraProcesadaDin) return;
+            ultimaBarraProcesadaDin = CurrentBar;
+
+            DateTime tiempoActual = Time[0];
+
+            EvaluarYLimpiarZonasExpiradasDin(tiempoActual);
+
+            if ((tiempoActual - ultimoLogDin).TotalMinutes >= FrecuenciaLogMinutosD)
+            {
+                LogEstadoGeneralDin(tiempoActual);
+                ultimoLogDin = tiempoActual;
+            }
+
+            if (ActivarDeteccionPatronesD)
+            {
+                DetectarPatronesEnZonasDin();
+            }
+
+            if (bloqueActualDin == null || tiempoActual >= bloqueActualDin.Fin)
+            {
+                if (bloqueActualDin != null)
+                {
+                    LogFinalizacionBloqueDin(bloqueActualDin);
+                    
+                    ProcesarZonaDinamicaDin(bloqueActualDin);
+                    
+                    historialBloquesDin.Add(bloqueActualDin);
+                    
+                    if (DibujarBloquesD)
+                        DibujarBloqueDin(bloqueActualDin);
+                    
+                    LimpiarAntiguosDin();
+                    
+                    bloqueAnteriorDin = bloqueActualDin;
+                }
+
+                CrearNuevoBloqueDin(tiempoActual);
+                LogInicioBloqueDin(bloqueActualDin);
+            }
+            else
+            {
+                ActualizarBloqueActualDin();
+            }
+        }
+
+        protected override void OnOrderUpdate(Order order, double limitPrice, double stopPrice, 
+            int quantity, int filled, double averageFillPrice, OrderState orderState, 
+            DateTime time, ErrorCode error, string nativeError)
+        {
+            if (operacionActualDin == null) return;
+
+            // Asignar referencias a las órdenes
+            if (order.Name == "EntryTP1")
+                operacionActualDin.OrdenEntradaTP1 = order;
+            else if (order.Name == "EntryTP2")
+                operacionActualDin.OrdenEntradaTP2 = order;
+
+            // Verificar si la orden se llenó
+            if (orderState == OrderState.Filled)
+            {
+                if (order.Name == "EntryTP1")
+                {
+                    operacionActualDin.OrdenTP1Llena = true;
+                    if (LogsOperacionesD)
+                        Print($"✓ TP1 Llenada: {filled} contratos @ {averageFillPrice:F2}");
+                }
+                else if (order.Name == "EntryTP2")
+                {
+                    operacionActualDin.OrdenTP2Llena = true;
+                    if (LogsOperacionesD)
+                        Print($"✓ TP2 Llenada: {filled} contratos @ {averageFillPrice:F2}");
+                }
+                
+                // Marcar operación como en curso solo cuando al menos una orden se llena
+                if (!operacionEnCursoDin)
+                {
+                    operacionEnCursoDin = true;
+                    if (LogsOperacionesD)
+                        Print($"✓ OPERACIÓN ACTIVADA - Órdenes confirmadas");
+                }
+            }
+
+            if (orderState == OrderState.Rejected)
+            {
+                Print($"⚠️ ORDEN RECHAZADA: {order.Name} - {error} - {nativeError}");
+                
+                // Si ambas órdenes fueron rechazadas, limpiar operación
+                if (operacionActualDin.OrdenEntradaTP1 != null && 
+                    operacionActualDin.OrdenEntradaTP2 != null &&
+                    operacionActualDin.OrdenEntradaTP1.OrderState == OrderState.Rejected &&
+                    operacionActualDin.OrdenEntradaTP2.OrderState == OrderState.Rejected)
+                {
+                    Print($"❌ OPERACIÓN CANCELADA - Todas las órdenes rechazadas");
+                    operacionActualDin = null;
+                    operacionEnCursoDin = false;
+                }
+            }
+            
+            if (orderState == OrderState.Cancelled)
+            {
+                if (LogsOperacionesD)
+                    Print($"⚪ Orden cancelada: {order.Name}");
+            }
+        }
+
+        #region Gestión de Bloques
+        private void CrearNuevoBloqueDin(DateTime tiempoActual)
+        {
+            contadorBloquesDin++;
+            
+            bloqueActualDin = new BloqueDin
+            {
+                NumeroBloque = contadorBloquesDin,
+                Inicio = IniciarEnHoraD ? AlinearTiempoDin(tiempoActual) : tiempoActual,
+                High = High[0],
+                Low = Low[0],
+                TiempoHigh = Time[0],
+                TiempoLow = Time[0]
+            };
+            
+            bloqueActualDin.Fin = bloqueActualDin.Inicio.AddMinutes(intervalMinutosDin);
+        }
+
+        private DateTime AlinearTiempoDin(DateTime tiempo)
+        {
+            int minutos = intervalMinutosDin;
+            return new DateTime(tiempo.Year, tiempo.Month, tiempo.Day, 
+                               tiempo.Hour, (tiempo.Minute / minutos) * minutos, 0);
+        }
+
+        private void ActualizarBloqueActualDin()
+        {
+            if (High[0] > bloqueActualDin.High)
+            {
+                bloqueActualDin.High = High[0];
+                bloqueActualDin.TiempoHigh = Time[0];
+            }
+            
+            if (Low[0] < bloqueActualDin.Low)
+            {
+                bloqueActualDin.Low = Low[0];
+                bloqueActualDin.TiempoLow = Time[0];
+            }
+        }
+        #endregion
+
+        #region Zonas Premium Dinámicas
+        private void ProcesarZonaDinamicaDin(BloqueDin bloqueNuevo)
+        {
+            bool esAlcista = bloqueNuevo.TiempoHigh > bloqueNuevo.TiempoLow;
+            bloqueNuevo.EsAlcista = esAlcista;
+            
+            if (bloqueAnteriorDin == null)
+            {
+                CrearNuevaZonaDin(bloqueNuevo, null);
+                return;
+            }
+            
+            bool cambioTendencia = bloqueAnteriorDin.EsAlcista != esAlcista;
+            
+            if (cambioTendencia)
+            {
+                CrearNuevaZonaDin(bloqueNuevo, bloqueAnteriorDin);
+                
+                if (CancelarPorSuperposicionD)
+                {
+                    VerificarYCancelarSuperposicionesDin();
+                }
+            }
+            else
+            {
+                RecalcularZonaActivaDin(bloqueNuevo, bloqueAnteriorDin);
+            }
+        }
+
+        private void CrearNuevaZonaDin(BloqueDin bloqueActual, BloqueDin bloqueAnterior)
+        {
+            contadorZonasDin++;
+            
+            var nuevaZona = new ZonaDinamica
+            {
+                Id = contadorZonasDin,
+                FechaCreacion = bloqueActual.Fin,
+                FechaUltimaActualizacion = bloqueActual.Fin,
+                FechaExpiracion = bloqueActual.Fin.AddMinutes(DuracionMaximaZonaMinutosD),
+                EsAlcista = bloqueActual.EsAlcista,
+                EstadoZ = 0,
+                BloqueInicialId = bloqueActual.NumeroBloque,
+                BloqueActualId = bloqueActual.NumeroBloque,
+                TagVisualizacion = "ZonaDin_" + contadorZonasDin
+            };
+            
+            CalcularLimitesZonaDin(nuevaZona, bloqueActual, bloqueAnterior);
+            
+            zonasActivasDin.Add(nuevaZona);
+            
+            if (DibujarZonasPremiumD)
+            {
+                DibujarZonaPremiumDin(nuevaZona, bloqueActual.Fin);
+            }
+            
+            if (LogsZonasD)
+            {
+                LogCreacionZonaDin(nuevaZona, bloqueActual, bloqueAnterior);
+            }
+        }
+
+        private void RecalcularZonaActivaDin(BloqueDin bloqueNuevo, BloqueDin bloqueAnterior)
+        {
+            var zonaActiva = zonasActivasDin
+                .Where(z => z.EstadoZ == 0 && z.EsAlcista == bloqueNuevo.EsAlcista)
+                .OrderByDescending(z => z.FechaUltimaActualizacion)
+                .FirstOrDefault();
+            
+            if (zonaActiva == null)
+            {
+                CrearNuevaZonaDin(bloqueNuevo, bloqueAnterior);
+                return;
+            }
+            
+            bool debeRecalcular = false;
+            
+            if (bloqueNuevo.EsAlcista)
+            {
+                if (bloqueNuevo.High > bloqueAnterior.High)
+                {
+                    debeRecalcular = true;
+                }
+            }
+            else
+            {
+                if (bloqueNuevo.Low < bloqueAnterior.Low)
+                {
+                    debeRecalcular = true;
+                }
+            }
+            
+            if (!debeRecalcular)
+            {
+                if (LogsZonasD)
+                {
+                    string tendencia = zonaActiva.EsAlcista ? "Alcista" : "Bajista";
+                    Print($"\n⚪ ZONA #{zonaActiva.Id} SIN CAMBIOS - Bloque #{bloqueNuevo.NumeroBloque} es interno");
+                    Print($"   Zona {tendencia} se mantiene: [{zonaActiva.LimiteInferior:F2} - {zonaActiva.LimiteSuperior:F2}]");
+                }
+                
+                zonaActiva.FechaExpiracion = bloqueNuevo.Fin.AddMinutes(DuracionMaximaZonaMinutosD);
+                return;
+            }
+            
+            double limInfAnterior = zonaActiva.LimiteInferior;
+            double limSupAnterior = zonaActiva.LimiteSuperior;
+            
+            CalcularLimitesZonaDin(zonaActiva, bloqueNuevo, bloqueAnterior);
+            
+            zonaActiva.FechaUltimaActualizacion = bloqueNuevo.Fin;
+            zonaActiva.FechaExpiracion = bloqueNuevo.Fin.AddMinutes(DuracionMaximaZonaMinutosD);
+            zonaActiva.BloqueActualId = bloqueNuevo.NumeroBloque;
+            zonaActiva.NumeroRecalculos++;
+            zonaActiva.EstadoZ = 1;
+            
+            zonaActiva.Recalculos.Add(new RecalculoDin
+            {
+                Fecha = bloqueNuevo.Fin,
+                BloqueId = bloqueNuevo.NumeroBloque,
+                LimiteInferiorAnterior = limInfAnterior,
+                LimiteSuperiorAnterior = limSupAnterior,
+                LimiteInferiorNuevo = zonaActiva.LimiteInferior,
+                LimiteSuperiorNuevo = zonaActiva.LimiteSuperior,
+                Motivo = "Extensión de zona - Nuevo extremo alcanzado"
+            });
+            
+            if (DibujarZonasPremiumD)
+            {
+                RemoveDrawObject(zonaActiva.TagVisualizacion);
+                RemoveDrawObject(zonaActiva.TagVisualizacion + "_Rect");
+                DibujarZonaPremiumDin(zonaActiva, bloqueNuevo.Fin);
+            }
+            
+            if (LogsZonasD)
+            {
+                LogRecalculoZonaDin(zonaActiva, bloqueNuevo, limInfAnterior, limSupAnterior);
+            }
+        }
+
+        private void CalcularLimitesZonaDin(ZonaDinamica zona, BloqueDin bloqueActual, BloqueDin bloqueAnterior)
+        {
+            double puntoExtremo, puntoActual;
+            
+            if (zona.EsAlcista)
+            {
+                if (bloqueAnterior != null)
+                {
+                    puntoExtremo = Math.Min(bloqueAnterior.Low, bloqueActual.Low);
+                }
+                else
+                {
+                    puntoExtremo = bloqueActual.Low;
+                }
+                
+                puntoActual = bloqueActual.High;
+                
+                double distanciaTicks = (puntoActual - puntoExtremo) / TickSize;
+                double umbralTicks = distanciaTicks * (UmbralZonaPctD / 100.0);
+                
+                zona.LimiteInferior = puntoExtremo;
+                zona.LimiteSuperior = puntoExtremo + (umbralTicks * TickSize);
+                zona.PuntoExtremo = puntoExtremo;
+                zona.PuntoActual = puntoActual;
+            }
+            else
+            {
+                if (bloqueAnterior != null)
+                {
+                    puntoExtremo = Math.Max(bloqueAnterior.High, bloqueActual.High);
+                }
+                else
+                {
+                    puntoExtremo = bloqueActual.High;
+                }
+                
+                puntoActual = bloqueActual.Low;
+                
+                double distanciaTicks = (puntoExtremo - puntoActual) / TickSize;
+                double umbralTicks = distanciaTicks * (UmbralZonaPctD / 100.0);
+                
+                zona.LimiteSuperior = puntoExtremo;
+                zona.LimiteInferior = puntoExtremo - (umbralTicks * TickSize);
+                zona.PuntoExtremo = puntoExtremo;
+                zona.PuntoActual = puntoActual;
+            }
+        }
+
+        private void VerificarYCancelarSuperposicionesDin()
+        {
+            var zonasActivas = zonasActivasDin.Where(z => z.EstadoZ == 0 || z.EstadoZ == 1).ToList();
+            
+            if (zonasActivas.Count < 2) return;
+            
+            var zonaNueva = zonasActivas[zonasActivas.Count - 1];
+            
+            for (int i = zonasActivas.Count - 2; i >= 0; i--)
+            {
+                var zonaAntigua = zonasActivas[i];
+                
+                if (zonaNueva.SeSuperpone(zonaAntigua))
+                {
+                    zonaAntigua.EstadoZ = 2;
+                    
+                    if (LogsZonasD)
+                    {
+                        Print($"\n❌ ZONA #{zonaAntigua.Id} CANCELADA POR SUPERPOSICIÓN");
+                        Print($"   Superpuesta con Zona #{zonaNueva.Id}");
+                    }
+                    
+                    if (DibujarZonasPremiumD)
+                    {
+                        RemoveDrawObject(zonaAntigua.TagVisualizacion);
+                        RemoveDrawObject(zonaAntigua.TagVisualizacion + "_Rect");
+                    }
+                }
+            }
+        }
+
+        private void EvaluarYLimpiarZonasExpiradasDin(DateTime tiempoActual)
+        {
+            var zonasParaExpirar = zonasActivasDin
+                .Where(z => (z.EstadoZ == 0 || z.EstadoZ == 1) && z.EstaExpirada(tiempoActual))
+                .ToList();
+            
+            foreach (var zona in zonasParaExpirar)
+            {
+                zona.EstadoZ = 3;
+                
+                if (LogsZonasD)
+                {
+                    Print($"\n⏰ ZONA #{zona.Id} EXPIRADA");
+                    Print($"   Creada: {zona.FechaCreacion:yyyy-MM-dd HH:mm}");
+                    Print($"   Expiración: {zona.FechaExpiracion:yyyy-MM-dd HH:mm}");
+                    Print($"   Duración: {(tiempoActual - zona.FechaCreacion).TotalMinutes:F0} minutos");
+                }
+            }
+            
+            if (LimpiarZonasExpiradasD)
+            {
+                var zonasAEliminar = zonasActivasDin
+                    .Where(z => z.EstadoZ == 3 || z.EstadoZ == 2)
+                    .ToList();
+                
+                foreach (var zona in zonasAEliminar)
+                {
+                    RemoveDrawObject(zona.TagVisualizacion);
+                    RemoveDrawObject(zona.TagVisualizacion + "_Rect");
+                    
+                    zonasActivasDin.Remove(zona);
+                }
+                
+                if (zonasAEliminar.Count > 0 && LogsZonasD)
+                {
+                    Print($"   ✓ {zonasAEliminar.Count} zonas expiradas/canceladas eliminadas");
+                }
+            }
+        }
+        #endregion
+
+        #region Detección de Patrones
+        private void DetectarPatronesEnZonasDin()
+        {
+            if (operacionEnCursoDin) return;
+
+            foreach (var zona in zonasActivasDin.Where(z => z.EstadoZ == 0 || z.EstadoZ == 1))
+            {
+                if (!zona.EsAlcista)
+                {
+                    if (Close[0] >= Open[0]) continue;
+                    
+                    if (DetectarPatronShortDin(zona))
+                    {
+                        RegistrarSenalDin(zona, false);
+                    }
+                }
+                else
+                {
+                    if (Close[0] <= Open[0]) continue;
+                    
+                    if (DetectarPatronLongDin(zona))
+                    {
+                        RegistrarSenalDin(zona, true);
+                    }
+                }
+            }
+        }
+
+        private bool DetectarPatronShortDin(ZonaDinamica zona)
+        {
+            int velasAlcistasRequeridas = NVelasAlcistasPatronBajistaD;
+            int velasBajistasRequeridas = NVelasBajistasPatronBajistaD;
+            int totalVelas = velasAlcistasRequeridas + velasBajistasRequeridas;
+            
+            if (CurrentBar < totalVelas) return false;
+            
+            for (int i = 0; i < velasBajistasRequeridas; i++)
+            {
+                if (Close[i] >= Open[i]) return false;
+            }
+            
+            for (int i = velasBajistasRequeridas; i < totalVelas; i++)
+            {
+                if (Close[i] <= Open[i]) return false;
+            }
+            
+            int indiceVelaReversion = velasBajistasRequeridas;
+            
+            bool velaEnZona = (High[indiceVelaReversion] <= zona.LimiteSuperior) && 
+                              (Low[indiceVelaReversion] >= zona.LimiteInferior);
+            
+            if (!velaEnZona)
+            {
+                if (LogsPatronesD)
+                {
+                    Print($"\n❌ PATRÓN SHORT RECHAZADO - Vela reversión fuera de zona #{zona.Id}");
+                }
+                return false;
+            }
+            
+            if (LogsPatronesD)
+            {
+                Print($"\n✓ PATRON SHORT DETECTADO - Zona #{zona.Id}");
+            }
+            
+            return true;
+        }
+
+        private bool DetectarPatronLongDin(ZonaDinamica zona)
+        {
+            int velasBajistasRequeridas = NVelasBajistasPatronAlcistaD;
+            int velasAlcistasRequeridas = NVelasAlcistasPatronAlcistaD;
+            int totalVelas = velasBajistasRequeridas + velasAlcistasRequeridas;
+            
+            if (CurrentBar < totalVelas) return false;
+            
+            for (int i = 0; i < velasAlcistasRequeridas; i++)
+            {
+                if (Close[i] <= Open[i]) return false;
+            }
+            
+            for (int i = velasAlcistasRequeridas; i < totalVelas; i++)
+            {
+                if (Close[i] >= Open[i]) return false;
+            }
+            
+            int indiceVelaReversion = velasAlcistasRequeridas;
+            
+            bool velaEnZona = (High[indiceVelaReversion] <= zona.LimiteSuperior) && 
+                              (Low[indiceVelaReversion] >= zona.LimiteInferior);
+            
+            if (!velaEnZona)
+            {
+                if (LogsPatronesD)
+                {
+                    Print($"\n❌ PATRÓN LONG RECHAZADO - Vela reversión fuera de zona #{zona.Id}");
+                }
+                return false;
+            }
+            
+            if (LogsPatronesD)
+            {
+                Print($"\n✓ PATRON LONG DETECTADO - Zona #{zona.Id}");
+            }
+            
+            return true;
+        }
+        
+        private bool ValidarFiltroEMA(bool esAlcista, double precioSenal)
+        {
+            if (!ActivarFiltroEMAD) return true;
+            
+            if (CurrentBar < PeriodoEMAD) return false;
+            
+            double valorEMA = emaFiltroD[0];
+            double toleranciaPrecio = ToleranciaEMATicksD * TickSize;
+            
+            double limiteInferiorTolerancia = valorEMA - toleranciaPrecio;
+            double limiteSuperiorTolerancia = valorEMA + toleranciaPrecio;
+            
+            bool enZonaTolerancia = (precioSenal >= limiteInferiorTolerancia && 
+                                      precioSenal <= limiteSuperiorTolerancia);
+            
+            if (enZonaTolerancia)
+            {
+                if (LogsPatronesD)
+                {
+                    string direccion = esAlcista ? "LONG" : "SHORT";
+                    Print($"   ✓ {direccion} EN ZONA TOLERANCIA (EMA: {valorEMA:F2}, Precio: {precioSenal:F2})");
+                }
+                return true;
+            }
+            
+            if (esAlcista)
+            {
+                bool valido = precioSenal > valorEMA;
+                
+                if (!valido && LogsPatronesD)
+                {
+                    Print($"   ❌ LONG RECHAZADO por filtro EMA");
+                    Print($"      Precio: {precioSenal:F2} | EMA: {valorEMA:F2}");
+                    Print($"      El precio debe estar por encima de EMA para LONGs");
+                }
+                
+                return valido;
+            }
+            else
+            {
+                bool valido = precioSenal < valorEMA;
+                
+                if (!valido && LogsPatronesD)
+                {
+                    Print($"   ❌ SHORT RECHAZADO por filtro EMA");
+                    Print($"      Precio: {precioSenal:F2} | EMA: {valorEMA:F2}");
+                    Print($"      El precio debe estar por debajo de EMA para SHORTs");
+                }
+                
+                return valido;
+            }
+        }
+
+        private void RegistrarSenalDin(ZonaDinamica zona, bool esAlcista)
+        {
+            double precioSenal = esAlcista 
+                ? (zona.PrecioEnZona(Low[0]) ? Low[0] : zona.LimiteSuperior)
+                : (zona.PrecioEnZona(High[0]) ? High[0] : zona.LimiteInferior);
+            
+            if (!ValidarFiltroEMA(esAlcista, precioSenal))
+            {
+                return;
+            }
+            
+            contadorSenalesDin++;
+            
+            var senal = new SenalOperacionDin
+            {
+                Id = contadorSenalesDin,
+                Fecha = Time[0],
+                ZonaId = zona.Id,
+                EsAlcista = esAlcista,
+                PrecioSenal = precioSenal,
+                BarIndex = CurrentBar,
+                PatronCompleto = true,
+                OperacionEjecutada = false
+            };
+            
+            zona.Senales.Add(senal);
+            
+            if (DibujarSenalesD)
+            {
+                DibujarSenalOperacionDin(senal);
+            }
+            
+            LogSenalDetectadaDin(senal, zona);
+            
+            if (ActivarTradingD && !operacionEnCursoDin)
+            {
+                EjecutarOperacionDin(senal, zona);
+            }
+        }
+        #endregion
+
+        #region Gestión de Operaciones
+        private void EjecutarOperacionDin(SenalOperacionDin senal, ZonaDinamica zona)
+        {
+            if (operacionEnCursoDin) return;
+
+            contadorOperacionesDin++;
+            
+            int contratosTP1 = (int)Math.Floor(ContratosTotalD * (PorcentajeTP1D / 100.0));
+            int contratosTP2 = ContratosTotalD - contratosTP1;
+            
+            if (!UsarTP2D)
+            {
+                contratosTP1 = ContratosTotalD;
+                contratosTP2 = 0;
+            }
+            
+            double precioEntrada = senal.PrecioSenal;
+            double precioStopLoss, precioTP1, precioTP2;
+            double riesgoTicks = StopLossTicksD;
+            double beneficioTP2Ticks = riesgoTicks * RelacionRiesgoTP2D;
+            
+            if (senal.EsAlcista)
+            {
+                precioStopLoss = precioEntrada - (StopLossTicksD * TickSize);
+                precioTP1 = precioEntrada + (TakeProfit1TicksD * TickSize);
+                precioTP2 = precioEntrada + (beneficioTP2Ticks * TickSize);
+                
+                if (contratosTP1 > 0) EnterLong(contratosTP1, "EntryTP1");
+                if (UsarTP2D && contratosTP2 > 0) EnterLong(contratosTP2, "EntryTP2");
+            }
+            else
+            {
+                precioStopLoss = precioEntrada + (StopLossTicksD * TickSize);
+                precioTP1 = precioEntrada - (TakeProfit1TicksD * TickSize);
+                precioTP2 = precioEntrada - (beneficioTP2Ticks * TickSize);
+                
+                if (contratosTP1 > 0) EnterShort(contratosTP1, "EntryTP1");
+                if (UsarTP2D && contratosTP2 > 0) EnterShort(contratosTP2, "EntryTP2");
+            }
+            
+            operacionActualDin = new OperacionActivaDin
+            {
+                Id = contadorOperacionesDin,
+                FechaApertura = Time[0],
+                EsAlcista = senal.EsAlcista,
+                PrecioEntrada = precioEntrada,
+                ContratosTotal = ContratosTotalD,
+                ContratosTP1 = contratosTP1,
+                ContratosTP2 = contratosTP2,
+                PrecioStopLoss = precioStopLoss,
+                PrecioTP1 = precioTP1,
+                PrecioTP2 = precioTP2,
+                EstadoOp = 0,
+                TP1Ejecutado = false,
+                TrailingActivo = false,
+                UltimoStopTrailing = precioStopLoss,
+                ZonaId = zona.Id,
+                SenalId = senal.Id,
+                OrdenTP1Llena = false,
+                OrdenTP2Llena = false
+            };
+            
+            // NO marcar como en curso hasta que OnOrderUpdate confirme
+            senal.OperacionEjecutada = true;
+            
+            LogAperturaOperacionDin(operacionActualDin, zona);
+        }
+
+        private void VerificarStopsYTargetsDin()
+        {
+            if (operacionActualDin == null || !operacionEnCursoDin) return;
+            
+            // Verificar que al menos una orden esté llena antes de gestionar stops
+            if (!operacionActualDin.OrdenTP1Llena && !operacionActualDin.OrdenTP2Llena)
+            {
+                return;
+            }
+            
+            double precioActual = Close[0];
+            
+            if (operacionActualDin.EsAlcista)
+            {
+                if (precioActual <= operacionActualDin.PrecioStopLoss)
+                {
+                    ExitLong();
+                    operacionActualDin.EstadoOp = 3;
+                    FinalizarOperacionDin("Stop Loss");
+                    return;
+                }
+                
+                if (!operacionActualDin.TP1Ejecutado && precioActual >= operacionActualDin.PrecioTP1)
+                {
+                    if (operacionActualDin.OrdenTP1Llena)
+                    {
+                        ExitLong(0, operacionActualDin.ContratosTP1, "TP1", "EntryTP1");
+                        operacionActualDin.TP1Ejecutado = true;
+                        operacionActualDin.EstadoOp = 1;
+                        
+                        if (UsarTP2D && ActivarTrailingStopD && operacionActualDin.OrdenTP2Llena)
+                        {
+                            operacionActualDin.TrailingActivo = true;
+                            operacionActualDin.UltimoStopTrailing = operacionActualDin.PrecioEntrada;
+                        }
+                    }
+                    return;
+                }
+                
+                if (operacionActualDin.TP1Ejecutado && UsarTP2D && precioActual >= operacionActualDin.PrecioTP2)
+                {
+                    if (operacionActualDin.OrdenTP2Llena)
+                    {
+                        ExitLong(0, operacionActualDin.ContratosTP2, "TP2", "EntryTP2");
+                        operacionActualDin.EstadoOp = 2;
+                        FinalizarOperacionDin("TP2 Alcanzado");
+                    }
+                    return;
+                }
+                
+                if (operacionActualDin.TrailingActivo)
+                {
+                    if (precioActual <= operacionActualDin.UltimoStopTrailing)
+                    {
+                        ExitLong(0, operacionActualDin.ContratosTP2, "TrailingStop", "EntryTP2");
+                        FinalizarOperacionDin("Trailing Stop");
+                        return;
+                    }
+                    GestionarTrailingStopDin();
+                }
+            }
+            else
+            {
+                if (precioActual >= operacionActualDin.PrecioStopLoss)
+                {
+                    ExitShort();
+                    operacionActualDin.EstadoOp = 3;
+                    FinalizarOperacionDin("Stop Loss");
+                    return;
+                }
+                
+                if (!operacionActualDin.TP1Ejecutado && precioActual <= operacionActualDin.PrecioTP1)
+                {
+                    if (operacionActualDin.OrdenTP1Llena)
+                    {
+                        ExitShort(0, operacionActualDin.ContratosTP1, "TP1", "EntryTP1");
+                        operacionActualDin.TP1Ejecutado = true;
+                        operacionActualDin.EstadoOp = 1;
+                        
+                        if (UsarTP2D && ActivarTrailingStopD && operacionActualDin.OrdenTP2Llena)
+                        {
+                            operacionActualDin.TrailingActivo = true;
+                            operacionActualDin.UltimoStopTrailing = operacionActualDin.PrecioEntrada;
+                        }
+                    }
+                    return;
+                }
+                
+                if (operacionActualDin.TP1Ejecutado && UsarTP2D && precioActual <= operacionActualDin.PrecioTP2)
+                {
+                    if (operacionActualDin.OrdenTP2Llena)
+                    {
+                        ExitShort(0, operacionActualDin.ContratosTP2, "TP2", "EntryTP2");
+                        operacionActualDin.EstadoOp = 2;
+                        FinalizarOperacionDin("TP2 Alcanzado");
+                    }
+                    return;
+                }
+                
+                if (operacionActualDin.TrailingActivo)
+                {
+                    if (precioActual >= operacionActualDin.UltimoStopTrailing)
+                    {
+                        ExitShort(0, operacionActualDin.ContratosTP2, "TrailingStop", "EntryTP2");
+                        FinalizarOperacionDin("Trailing Stop");
+                        return;
+                    }
+                    GestionarTrailingStopDin();
+                }
+            }
+        }
+
+        private void GestionarTrailingStopDin()
+        {
+            if (!operacionActualDin.TP1Ejecutado || !operacionActualDin.TrailingActivo) return;
+            
+            double precioActual = Close[0];
+            
+            if (operacionActualDin.EsAlcista)
+            {
+                double nivelActivacion = operacionActualDin.UltimoStopTrailing + (TrailingActivacionTicksD * TickSize);
+                
+                if (precioActual >= nivelActivacion)
+                {
+                    double nuevoStop = precioActual - (TrailingMovimientoTicksD * TickSize);
+                    
+                    if (nuevoStop > operacionActualDin.UltimoStopTrailing)
+                    {
+                        operacionActualDin.UltimoStopTrailing = nuevoStop;
+                    }
+                }
+            }
+            else
+            {
+                double nivelActivacion = operacionActualDin.UltimoStopTrailing - (TrailingActivacionTicksD * TickSize);
+                
+                if (precioActual <= nivelActivacion)
+                {
+                    double nuevoStop = precioActual + (TrailingMovimientoTicksD * TickSize);
+                    
+                    if (nuevoStop < operacionActualDin.UltimoStopTrailing)
+                    {
+                        operacionActualDin.UltimoStopTrailing = nuevoStop;
+                    }
+                }
+            }
+        }
+
+        private void FinalizarOperacionDin(string motivo)
+        {
+            if (operacionActualDin == null) return;
+            
+            operacionActualDin.EstadoOp = 4;
+            
+            if (LogsOperacionesD)
+            {
+                LogCierreOperacionDin(operacionActualDin, motivo);
+            }
+            
+            operacionEnCursoDin = false;
+            operacionActualDin = null;
+        }
+        #endregion
+
+        #region Visualización
+        private void DibujarBloqueDin(BloqueDin bloque)
+        {
+            string tag = "BloqueDin_" + bloque.Inicio.ToString("yyyyMMddHHmmss");
+            bloque.TagRectangulo = tag;
+            
+            Brush colorBorde = bloque.EsAlcista ? Brushes.DodgerBlue : Brushes.Crimson;
+            Brush colorRelleno = bloque.EsAlcista ? Brushes.LightBlue : Brushes.LightCoral;
+            
+            Brush relleno = colorRelleno.Clone();
+            relleno.Opacity = 0.15;
+            
+            Draw.Rectangle(this, tag, false,
+                bloque.Inicio, bloque.Low,
+                bloque.Fin, bloque.High,
+                colorBorde, relleno, 1);
+        }
+
+        private void DibujarZonaPremiumDin(ZonaDinamica zona, DateTime fechaInicio)
+        {
+            string tagLinea = zona.TagVisualizacion;
+            
+            Brush colorLinea = zona.EsAlcista ? Brushes.LimeGreen : Brushes.OrangeRed;
+            
+            double lineaCentral = (zona.LimiteInferior + zona.LimiteSuperior) / 2.0;
+            
+            Draw.Line(this, tagLinea, false,
+                fechaInicio, lineaCentral,
+                zona.FechaExpiracion, lineaCentral,
+                colorLinea, DashStyleHelper.Solid, 2);
+            
+            string tagZona = tagLinea + "_Rect";
+            Brush rellenoZona = colorLinea.Clone();
+            rellenoZona.Opacity = 0.25;
+            
+            Draw.Rectangle(this, tagZona, false,
+                fechaInicio, zona.LimiteInferior,
+                zona.FechaExpiracion, zona.LimiteSuperior,
+                colorLinea, rellenoZona, 1);
+        }
+
+        private void DibujarSenalOperacionDin(SenalOperacionDin senal)
+        {
+            string tag = "SenalDin_" + senal.Id + "_" + senal.Fecha.ToString("yyyyMMddHHmmss");
+            senal.TagFlecha = tag;
+            
+            if (senal.EsAlcista)
+            {
+                Draw.ArrowUp(this, tag, false, 0, senal.PrecioSenal, Brushes.LimeGreen);
+            }
+            else
+            {
+                Draw.ArrowDown(this, tag, false, 0, senal.PrecioSenal, Brushes.Red);
+            }
+        }
+
+        private void LimpiarAntiguosDin()
+        {
+            while (historialBloquesDin.Count > MaximoBloquesD)
+            {
+                var bloqueViejo = historialBloquesDin[0];
+                if (!string.IsNullOrEmpty(bloqueViejo.TagRectangulo))
+                    RemoveDrawObject(bloqueViejo.TagRectangulo);
+                historialBloquesDin.RemoveAt(0);
+            }
+        }
+        #endregion
+
+        #region Sistema de Logs
+        private void LogEncabezadoDin()
+        {
+            Print("\n╔═══════════════════════════════════════════════════════════════╗");
+            Print("║       ESTRATEGIA VELA GUIA DINÁMICA - ZONAS RECALCULADAS     ║");
+            Print("╠═══════════════════════════════════════════════════════════════╣");
+            Print($"║ Sistema: Zonas Premium Dinámicas");
+            Print($"║ Umbral: {UmbralZonaPctD}% del rango");
+            Print($"║ Duración máxima: {DuracionMaximaZonaMinutosD} minutos");
+            Print($"║ Cancelación por superposición: {(CancelarPorSuperposicionD ? "SÍ" : "NO")}");
+            Print($"║ Limpiar expiradas: {(LimpiarZonasExpiradasD ? "SÍ" : "NO")}");
+            Print($"║ ═══════════════════════════════════════════════════════════");
+            Print($"║ FILTRO EMA: {(ActivarFiltroEMAD ? "ACTIVADO" : "DESACTIVADO")}");
+            if (ActivarFiltroEMAD)
+            {
+                Print($"║ Periodo EMA: {PeriodoEMAD}");
+                Print($"║ Tolerancia: {ToleranciaEMATicksD} ticks");
+            }
+            Print($"║ ═══════════════════════════════════════════════════════════");
+            Print($"║ TRADING: {(ActivarTradingD ? "ACTIVADO" : "DESACTIVADO")}");
+            Print("╚═══════════════════════════════════════════════════════════════╝\n");
+        }
+
+        private void LogInicioBloqueDin(BloqueDin bloque)
+        {
+            if (!LogsDetalladosD) return;
+            
+            Print($"\n╔══════════════════════════════════════════════════════════════");
+            Print($"║ INICIO BLOQUE #{bloque.NumeroBloque}");
+            Print($"╠══════════════════════════════════════════════════════════════");
+            Print($"║ Tiempo: {bloque.Inicio:yyyy-MM-dd HH:mm:ss}");
+            Print($"║ Fin: {bloque.Fin:yyyy-MM-dd HH:mm:ss}");
+            Print($"╚══════════════════════════════════════════════════════════════");
+        }
+
+        private void LogFinalizacionBloqueDin(BloqueDin bloque)
+        {
+            if (!LogsDetalladosD) return;
+            
+            string tendencia = bloque.EsAlcista ? "Alcista" : "Bajista";
+            
+            Print($"\n╔══════════════════════════════════════════════════════════════");
+            Print($"║ FINALIZACIÓN BLOQUE #{bloque.NumeroBloque}");
+            Print($"╠══════════════════════════════════════════════════════════════");
+            Print($"║ HIGH: {bloque.High:F2} ({bloque.TiempoHigh:HH:mm:ss})");
+            Print($"║ LOW: {bloque.Low:F2} ({bloque.TiempoLow:HH:mm:ss})");
+            Print($"║ Tendencia: {tendencia}");
+            Print($"╚══════════════════════════════════════════════════════════════");
+        }
+
+        private void LogCreacionZonaDin(ZonaDinamica zona, BloqueDin bloqueActual, BloqueDin bloqueAnterior)
+        {
+            string tendencia = zona.EsAlcista ? "Alcista" : "Bajista";
+            
+            Print($"\n╔══════════════════════════════════════════════════════════════");
+            Print($"║ 🆕 NUEVA ZONA #{zona.Id} - {tendencia}");
+            Print($"╠══════════════════════════════════════════════════════════════");
+            Print($"║ Bloque: #{bloqueActual.NumeroBloque}");
+            Print($"║ Creada: {zona.FechaCreacion:HH:mm:ss}");
+            Print($"║ Expira: {zona.FechaExpiracion:HH:mm:ss} ({DuracionMaximaZonaMinutosD} min)");
+            
+            if (bloqueAnterior != null)
+            {
+                Print($"║ Bloques usados: #{bloqueAnterior.NumeroBloque}, #{bloqueActual.NumeroBloque}");
+                
+                if (zona.EsAlcista)
+                {
+                    Print($"║ LOW más bajo: {zona.PuntoExtremo:F2}");
+                    Print($"║ HIGH actual: {zona.PuntoActual:F2}");
+                }
+                else
+                {
+                    Print($"║ HIGH más alto: {zona.PuntoExtremo:F2}");
+                    Print($"║ LOW actual: {zona.PuntoActual:F2}");
+                }
+            }
+            
+            Print($"║ Zona: [{zona.LimiteInferior:F2} - {zona.LimiteSuperior:F2}]");
+            Print($"║ Total zonas activas: {zonasActivasDin.Count(z => z.EstadoZ == 0 || z.EstadoZ == 1)}");
+            Print($"╚══════════════════════════════════════════════════════════════");
+        }
+
+        private void LogRecalculoZonaDin(ZonaDinamica zona, BloqueDin bloqueNuevo, double limInfAnt, double limSupAnt)
+        {
+            string tendencia = zona.EsAlcista ? "Alcista" : "Bajista";
+            
+            Print($"\n╔══════════════════════════════════════════════════════════════");
+            Print($"║ 🔄 RECÁLCULO ZONA #{zona.Id} - {tendencia}");
+            Print($"╠══════════════════════════════════════════════════════════════");
+            Print($"║ Bloque nuevo: #{bloqueNuevo.NumeroBloque}");
+            Print($"║ Recálculos totales: {zona.NumeroRecalculos}");
+            Print($"║ Nueva expiración: {zona.FechaExpiracion:HH:mm:ss}");
+            Print($"║ ───────────────────────────────────────────────────────────");
+            Print($"║ ANTERIOR: [{limInfAnt:F2} - {limSupAnt:F2}]");
+            Print($"║ NUEVA:    [{zona.LimiteInferior:F2} - {zona.LimiteSuperior:F2}]");
+            Print($"╚══════════════════════════════════════════════════════════════");
+        }
+
+        private void LogSenalDetectadaDin(SenalOperacionDin senal, ZonaDinamica zona)
+        {
+            string direccion = senal.EsAlcista ? "LONG" : "SHORT";
+            
+            Print($"\n╔══════════════════════════════════════════════════════════════");
+            Print($"║ {direccion} SEÑAL #{senal.Id} - ZONA DINÁMICA #{zona.Id}");
+            Print($"╠══════════════════════════════════════════════════════════════");
+            Print($"║ Fecha: {senal.Fecha:yyyy-MM-dd HH:mm:ss}");
+            Print($"║ Precio: {senal.PrecioSenal:F2}");
+            Print($"║ Zona recalculada {zona.NumeroRecalculos} veces");
+            Print($"╚══════════════════════════════════════════════════════════════");
+        }
+
+        private void LogAperturaOperacionDin(OperacionActivaDin op, ZonaDinamica zona)
+        {
+            string direccion = op.EsAlcista ? "LONG" : "SHORT";
+            
+            Print($"\n╔══════════════════════════════════════════════════════════════");
+            Print($"║ {direccion} OPERACIÓN #{op.Id} ENVIADA (esperando confirmación)");
+            Print($"╠══════════════════════════════════════════════════════════════");
+            Print($"║ Entrada: {op.PrecioEntrada:F2}");
+            Print($"║ Contratos TP1: {op.ContratosTP1} | TP2: {op.ContratosTP2}");
+            Print($"║ Stop: {op.PrecioStopLoss:F2} | TP1: {op.PrecioTP1:F2} | TP2: {op.PrecioTP2:F2}");
+            Print($"╚══════════════════════════════════════════════════════════════");
+        }
+
+        private void LogCierreOperacionDin(OperacionActivaDin op, string motivo)
+        {
+            string direccion = op.EsAlcista ? "LONG" : "SHORT";
+            string[] estados = { "Abierta", "TP1Alcanzado", "TP2Alcanzado", "StopLoss", "Cerrada" };
+            
+            Print($"\n╔══════════════════════════════════════════════════════════════");
+            Print($"║ {direccion} OPERACIÓN #{op.Id} CERRADA");
+            Print($"╠══════════════════════════════════════════════════════════════");
+            Print($"║ Motivo: {motivo}");
+            Print($"║ Estado: {estados[op.EstadoOp]}");
+            Print($"╚══════════════════════════════════════════════════════════════");
+        }
+        
+        private void LogEstadoGeneralDin(DateTime tiempo)
+        {
+            if (!LogsDetalladosD) return;
+            
+            int zonasActivas = zonasActivasDin.Count(z => z.EstadoZ == 0 || z.EstadoZ == 1);
+            int zonasExpiradas = zonasActivasDin.Count(z => z.EstadoZ == 3);
+            int zonasCanceladas = zonasActivasDin.Count(z => z.EstadoZ == 2);
+            
+            Print($"\n╔══════════════════════════════════════════════════════════════");
+            Print($"║ RESUMEN DINÁMICO - {tiempo:HH:mm:ss}");
+            Print($"╠══════════════════════════════════════════════════════════════");
+            Print($"║ Bloques: {contadorBloquesDin}");
+            Print($"║ Zonas activas: {zonasActivas}");
+            Print($"║ Zonas expiradas: {zonasExpiradas} | Canceladas: {zonasCanceladas}");
+            Print($"║ Señales: {contadorSenalesDin} | Operaciones: {contadorOperacionesDin}");
+            
+            if (operacionEnCursoDin && operacionActualDin != null)
+            {
+                Print($"║ ═══════════════════════════════════════════════════════════");
+                Print($"║ OPERACIÓN EN CURSO:");
+                string dir = operacionActualDin.EsAlcista ? "LONG" : "SHORT";
+                string[] estados = { "Abierta", "TP1Alcanzado", "TP2Alcanzado", "StopLoss", "Cerrada" };
+                Print($"║ {dir} #{operacionActualDin.Id} | Estado: {estados[operacionActualDin.EstadoOp]}");
+                Print($"║ Entrada: {operacionActualDin.PrecioEntrada:F2} | Actual: {Close[0]:F2}");
+                Print($"║ TP1 llena: {operacionActualDin.OrdenTP1Llena} | TP2 llena: {operacionActualDin.OrdenTP2Llena}");
+            }
+            
+            Print($"╚══════════════════════════════════════════════════════════════");
+        }
+        #endregion
+    }
+}
