@@ -1,0 +1,2107 @@
+#region Using declarations
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.ComponentModel.DataAnnotations;
+using System.Linq;
+using System.Text;
+using System.Windows.Media;
+using System.Xml.Serialization;
+using NinjaTrader.Cbi;
+using NinjaTrader.Data;
+using NinjaTrader.Gui;
+using NinjaTrader.Gui.Chart;
+using NinjaTrader.NinjaScript;
+using NinjaTrader.NinjaScript.DrawingTools;
+using NinjaTrader.NinjaScript.Indicators;
+#endregion
+
+// ╔═══════════════════════════════════════════════════════════════════════════╗
+// ║       ESTRATEGIA VELA GUIA TP FIJO + EMA + TP3 INDEPENDIENTE            ║
+// ║                 PARTE 1 DE 2: CLASES Y PROPIEDADES                        ║
+// ╚═══════════════════════════════════════════════════════════════════════════╝
+
+namespace NinjaTrader.NinjaScript.Strategies
+{
+    // ========== CLASES EXCLUSIVAS DE ESTRATEGIA TP FIJO + EMA + TP3 ==========
+    
+    public class SenalOperacionTPFEMA
+    {
+        public int Id { get; set; }
+        public DateTime Fecha { get; set; }
+        public int ZonaId { get; set; }
+        public bool EsAlcista { get; set; }
+        public double PrecioSenal { get; set; }
+        public int BarIndex { get; set; }
+        public string TagFlecha { get; set; }
+        
+        public int VelasAlcistasPrevias { get; set; }
+        public int VelasBajistasPrevias { get; set; }
+        public bool PatronCompleto { get; set; }
+        public bool OperacionEjecutada { get; set; }
+        
+        // Datos específicos para TP3
+        public double HighVelaEntrada { get; set; }
+        public double LowVelaEntrada { get; set; }
+    }
+
+    public class OperacionActivaTPFEMA
+    {
+        public int Id { get; set; }
+        public DateTime FechaApertura { get; set; }
+        public bool EsAlcista { get; set; }
+        public double PrecioEntrada { get; set; }
+        public int ContratosTotal { get; set; }
+        public int ContratosTP1 { get; set; }
+        public int ContratosTP2 { get; set; }
+        public int ContratosTP3 { get; set; }
+        
+        public double PrecioStopLoss { get; set; }
+        public double PrecioTP1 { get; set; }
+        public double PrecioTP2 { get; set; }
+        public double PrecioTP3 { get; set; }
+        
+        // Stop Loss específico para TP3
+        public double PrecioStopLossTP3 { get; set; }
+        public int TicksStopLossTP3 { get; set; }
+        
+        public int EstadoOp { get; set; }
+        public bool TP1Ejecutado { get; set; }
+        public bool TP2Ejecutado { get; set; }
+        public bool TP3Ejecutado { get; set; }
+        public bool TrailingActivo { get; set; }
+        public double UltimoStopTrailing { get; set; }
+        
+        public int ZonaId { get; set; }
+        public int SenalId { get; set; }
+        
+        public Order OrdenEntradaTP1 { get; set; }
+        public Order OrdenEntradaTP2 { get; set; }
+        public Order OrdenEntradaTP3 { get; set; }
+        
+        public bool OrdenTP1Llena { get; set; }
+        public bool OrdenTP2Llena { get; set; }
+        public bool OrdenTP3Llena { get; set; }
+    }
+
+    public class ZonaTPFEMA
+    {
+        public int Id { get; set; }
+        public DateTime FechaCreacion { get; set; }
+        public DateTime FechaUltimaActualizacion { get; set; }
+        public DateTime FechaExpiracion { get; set; }
+        public bool EsAlcista { get; set; }
+        public int EstadoZ { get; set; }
+        
+        public double LimiteInferior { get; set; }
+        public double LimiteSuperior { get; set; }
+        
+        public int BloqueInicialId { get; set; }
+        public int BloqueActualId { get; set; }
+        
+        public double PuntoExtremo { get; set; }
+        public double PuntoActual { get; set; }
+        
+        public int NumeroRecalculos { get; set; }
+        public List<RecalculoTPFEMA> Recalculos { get; set; }
+        public List<SenalOperacionTPFEMA> Senales { get; set; }
+        
+        public string TagVisualizacion { get; set; }
+        
+        public ZonaTPFEMA()
+        {
+            Recalculos = new List<RecalculoTPFEMA>();
+            Senales = new List<SenalOperacionTPFEMA>();
+            EstadoZ = 0;
+            NumeroRecalculos = 0;
+        }
+        
+        public bool PrecioEnZona(double precio)
+        {
+            return precio >= LimiteInferior && precio <= LimiteSuperior;
+        }
+        
+        public bool SeSuperpone(ZonaTPFEMA otraZona)
+        {
+            return !(LimiteSuperior < otraZona.LimiteInferior || LimiteInferior > otraZona.LimiteSuperior);
+        }
+        
+        public bool EstaExpirada(DateTime tiempoActual)
+        {
+            return tiempoActual >= FechaExpiracion;
+        }
+    }
+
+    public class RecalculoTPFEMA
+    {
+        public DateTime Fecha { get; set; }
+        public int BloqueId { get; set; }
+        public double LimiteInferiorAnterior { get; set; }
+        public double LimiteSuperiorAnterior { get; set; }
+        public double LimiteInferiorNuevo { get; set; }
+        public double LimiteSuperiorNuevo { get; set; }
+        public string Motivo { get; set; }
+    }
+
+    public class BloqueTPFEMA
+    {
+        public int NumeroBloque { get; set; }
+        public DateTime Inicio { get; set; }
+        public DateTime Fin { get; set; }
+        public double High { get; set; }
+        public double Low { get; set; }
+        public DateTime TiempoHigh { get; set; }
+        public DateTime TiempoLow { get; set; }
+        public bool EsAlcista { get; set; }
+        public string TagRectangulo { get; set; }
+    }
+
+    public partial class EstrategiaVelaGuiaTPFijo_EMA : Strategy
+    {
+        #region Variables
+        private List<ZonaTPFEMA> zonasActivasTPFEMA;
+        private List<BloqueTPFEMA> historialBloquesTPFEMA;
+        private BloqueTPFEMA bloqueActualTPFEMA;
+        private BloqueTPFEMA bloqueAnteriorTPFEMA;
+        
+        private int contadorZonasTPFEMA = 0;
+        private int contadorBloquesTPFEMA = 0;
+        private int contadorSenalesTPFEMA = 0;
+        private int contadorOperacionesTPFEMA = 0;
+        private int intervalMinutosTPFEMA;
+        private DateTime ultimoLogTPFEMA;
+        
+        private OperacionActivaTPFEMA operacionActualTPFEMA;
+        private bool operacionEnCursoTPFEMA = false;
+        
+        private int ultimaBarraProcesadaTPFEMA = -1;
+        
+        private EMA emaFiltroTPFEMA;
+        #endregion
+
+        #region Properties
+        [NinjaScriptProperty]
+        [Display(Name = "Intervalo Bloque (minutos)", Order = 1, GroupName = "1. Configuración Bloques")]
+        public int IntervaloBloqueTPFEMA { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Iniciar en Hora Exacta", Order = 2, GroupName = "1. Configuración Bloques")]
+        public bool IniciarEnHoraTPFEMA { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(1, 100)]
+        [Display(Name = "Umbral Zona Premium (%)", Order = 3, GroupName = "2. Zona Premium Dinámica")]
+        public int UmbralZonaPctTPFEMA { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Cancelar por Superposición", Order = 4, GroupName = "2. Zona Premium Dinámica")]
+        public bool CancelarPorSuperposicionTPFEMA { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(30, 10080)]
+        [Display(Name = "Duración Máxima Zona (minutos)", Order = 5, GroupName = "2. Zona Premium Dinámica")]
+        public int DuracionMaximaZonaMinutosTPFEMA { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Limpiar Zonas Expiradas", Order = 6, GroupName = "2. Zona Premium Dinámica")]
+        public bool LimpiarZonasExpiradasTPFEMA { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(1, 10)]
+        [Display(Name = "Velas Alcistas (Patrón Bajista)", Order = 7, GroupName = "3. Patrones de Reversión")]
+        public int NVelasAlcistasPatronBajistaTPFEMA { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(1, 10)]
+        [Display(Name = "Velas Bajistas (Patrón Bajista)", Order = 8, GroupName = "3. Patrones de Reversión")]
+        public int NVelasBajistasPatronBajistaTPFEMA { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(1, 10)]
+        [Display(Name = "Velas Bajistas (Patrón Alcista)", Order = 9, GroupName = "3. Patrones de Reversión")]
+        public int NVelasBajistasPatronAlcistaTPFEMA { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(1, 10)]
+        [Display(Name = "Velas Alcistas (Patrón Alcista)", Order = 10, GroupName = "3. Patrones de Reversión")]
+        public int NVelasAlcistasPatronAlcistaTPFEMA { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Activar Detección Patrones", Order = 11, GroupName = "3. Patrones de Reversión")]
+        public bool ActivarDeteccionPatronesTPFEMA { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Activar Trading Automático", Order = 12, GroupName = "4. Gestión de Operaciones")]
+        public bool ActivarTradingTPFEMA { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(1, 100)]
+        [Display(Name = "Contratos Totales (TP1+TP2)", Order = 13, GroupName = "4. Gestión de Operaciones")]
+        public int ContratosTotalTPFEMA { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Usar TP1", Order = 14, GroupName = "4. Gestión de Operaciones")]
+        public bool UsarTP1TPFEMA { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(1, 100)]
+        [Display(Name = "Porcentaje TP1 (%)", Order = 15, GroupName = "4. Gestión de Operaciones")]
+        public int PorcentajeTP1TPFEMA { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(1, 1000)]
+        [Display(Name = "Stop Loss (ticks)", Order = 16, GroupName = "4. Gestión de Operaciones")]
+        public int StopLossTicksTPFEMA { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(1, 1000)]
+        [Display(Name = "Take Profit 1 (ticks)", Order = 17, GroupName = "4. Gestión de Operaciones")]
+        public int TakeProfit1TicksTPFEMA { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Usar TP2", Order = 18, GroupName = "4. Gestión de Operaciones")]
+        public bool UsarTP2TPFEMA { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(1, 10)]
+        [Display(Name = "Relación R:R para TP2 (1:X)", Order = 19, GroupName = "4. Gestión de Operaciones")]
+        public int RelacionRiesgoTP2TPFEMA { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Activar Trailing Stop", Order = 20, GroupName = "5. Trailing Stop")]
+        public bool ActivarTrailingStopTPFEMA { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(1, 500)]
+        [Display(Name = "Distancia Activación (ticks)", Order = 21, GroupName = "5. Trailing Stop")]
+        public int TrailingActivacionTicksTPFEMA { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(1, 500)]
+        [Display(Name = "Distancia Movimiento (ticks)", Order = 22, GroupName = "5. Trailing Stop")]
+        public int TrailingMovimientoTicksTPFEMA { get; set; }
+
+        // ========== NUEVAS PROPIEDADES PARA TP3 ==========
+        [NinjaScriptProperty]
+        [Display(Name = "═══════ TP3 INDEPENDIENTE ═══════", Order = 23, GroupName = "4A. TP3 Independiente")]
+        public bool SeparadorTP3 { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Activar TP3", Order = 24, GroupName = "4A. TP3 Independiente")]
+        public bool UsarTP3TPFEMA { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(1, 1000000)]
+        [Display(Name = "Riesgo TP3 ($)", Order = 25, GroupName = "4A. TP3 Independiente")]
+        public double RiesgoTP3TPFEMA { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(0.01, 1000)]
+        [Display(Name = "Valor Tick ($)", Order = 26, GroupName = "4A. TP3 Independiente")]
+        public double ValorTickTP3TPFEMA { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(0, 100)]
+        [Display(Name = "Ticks Deslizamiento SL", Order = 27, GroupName = "4A. TP3 Independiente")]
+        public int TicksDeslizamientoTP3TPFEMA { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(0, 1)]
+        [Display(Name = "Tipo Stop Loss (0=Vela | 1=Zona)", Order = 28, GroupName = "4A. TP3 Independiente")]
+        public int TipoStopLossTP3TPFEMA { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(1, 10)]
+        [Display(Name = "Relación R:B - Riesgo (ej: 1 en 1:2)", Order = 29, GroupName = "4A. TP3 Independiente")]
+        public int RelacionRiesgoTP3TPFEMA { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(1, 10)]
+        [Display(Name = "Relación R:B - Beneficio (ej: 2 en 1:2)", Order = 30, GroupName = "4A. TP3 Independiente")]
+        public int RelacionBeneficioTP3TPFEMA { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Logs TP3", Order = 31, GroupName = "4A. TP3 Independiente")]
+        public bool LogsTP3TPFEMA { get; set; }
+        
+        // ========== PROPIEDADES RESTANTES ==========
+        [NinjaScriptProperty]
+        [Display(Name = "Logs Detallados", Order = 32, GroupName = "6. Debug")]
+        public bool LogsDetalladosTPFEMA { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Logs cada X minutos", Order = 33, GroupName = "6. Debug")]
+        public int FrecuenciaLogMinutosTPFEMA { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Logs de Zonas", Order = 34, GroupName = "6. Debug")]
+        public bool LogsZonasTPFEMA { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Logs de Patrones", Order = 35, GroupName = "6. Debug")]
+        public bool LogsPatronesTPFEMA { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Logs de Operaciones", Order = 36, GroupName = "6. Debug")]
+        public bool LogsOperacionesTPFEMA { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Dibujar Bloques", Order = 37, GroupName = "7. Visualización")]
+        public bool DibujarBloquesTPFEMA { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Dibujar Zonas Premium", Order = 38, GroupName = "7. Visualización")]
+        public bool DibujarZonasPremiumTPFEMA { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Dibujar Señales", Order = 39, GroupName = "7. Visualización")]
+        public bool DibujarSenalesTPFEMA { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(10, 200)]
+        [Display(Name = "Máximo Bloques Visibles", Order = 40, GroupName = "7. Visualización")]
+        public int MaximoBloquesTPFEMA { get; set; }
+        
+        [NinjaScriptProperty]
+        [Display(Name = "Activar Filtro EMA", Order = 41, GroupName = "8. Filtro de Tendencia")]
+        public bool ActivarFiltroEMATPFEMA { get; set; }
+        
+        [NinjaScriptProperty]
+        [Range(1, 1000)]
+        [Display(Name = "Periodo EMA", Order = 42, GroupName = "8. Filtro de Tendencia")]
+        public int PeriodoEMATPFEMA { get; set; }
+        
+        [NinjaScriptProperty]
+        [Range(1, 100)]
+        [Display(Name = "Tolerancia EMA (ticks)", Order = 43, GroupName = "8. Filtro de Tendencia")]
+        public int ToleranciaEMATicksTPFEMA { get; set; }
+        
+        [NinjaScriptProperty]
+        [Display(Name = "Dibujar EMA", Order = 44, GroupName = "8. Filtro de Tendencia")]
+        public bool DibujarEMATPFEMA { get; set; }
+        #endregion
+    }
+}
+
+// ╔═══════════════════════════════════════════════════════════════════════════╗
+// ║       ESTRATEGIA VELA GUIA TP FIJO + EMA + TP3 INDEPENDIENTE            ║
+// ║              PARTE 2 DE 2: IMPLEMENTACIÓN COMPLETA                        ║
+// ╚═══════════════════════════════════════════════════════════════════════════╝
+
+namespace NinjaTrader.NinjaScript.Strategies
+{
+    public partial class EstrategiaVelaGuiaTPFijo_EMA : Strategy
+    {
+        protected override void OnStateChange()
+        {
+            if (State == State.SetDefaults)
+            {
+                Description = @"Estrategia con TP Fijo, EMA, TP3 Independiente y zonas premium dinámicas";
+                Name = "EstrategiaVelaGuiaTPFijo_EMA";
+                
+                Calculate = Calculate.OnEachTick;
+                
+                EntriesPerDirection = 3;
+                EntryHandling = EntryHandling.AllEntries;
+                IsExitOnSessionCloseStrategy = true;
+                ExitOnSessionCloseSeconds = 30;
+                IsFillLimitOnTouch = false;
+                MaximumBarsLookBack = MaximumBarsLookBack.TwoHundredFiftySix;
+                OrderFillResolution = OrderFillResolution.Standard;
+                Slippage = 0;
+                StartBehavior = StartBehavior.WaitUntilFlat;
+                TimeInForce = TimeInForce.Gtc;
+                TraceOrders = false;
+                RealtimeErrorHandling = RealtimeErrorHandling.StopCancelClose;
+                StopTargetHandling = StopTargetHandling.PerEntryExecution;
+                BarsRequiredToTrade = 20;
+                IsInstantiatedOnEachOptimizationIteration = true;
+                
+                IntervaloBloqueTPFEMA = 30;
+                IniciarEnHoraTPFEMA = true;
+                UmbralZonaPctTPFEMA = 30;
+                CancelarPorSuperposicionTPFEMA = true;
+                DuracionMaximaZonaMinutosTPFEMA = 1440;
+                LimpiarZonasExpiradasTPFEMA = true;
+                
+                NVelasAlcistasPatronBajistaTPFEMA = 3;
+                NVelasBajistasPatronBajistaTPFEMA = 2;
+                NVelasBajistasPatronAlcistaTPFEMA = 3;
+                NVelasAlcistasPatronAlcistaTPFEMA = 2;
+                ActivarDeteccionPatronesTPFEMA = true;
+                
+                ActivarTradingTPFEMA = false;
+                ContratosTotalTPFEMA = 2;
+                UsarTP1TPFEMA = true;
+                PorcentajeTP1TPFEMA = 50;
+                StopLossTicksTPFEMA = 20;
+                TakeProfit1TicksTPFEMA = 30;
+                UsarTP2TPFEMA = true;
+                RelacionRiesgoTP2TPFEMA = 2;
+                
+                // Valores por defecto TP3
+                SeparadorTP3 = false;
+                UsarTP3TPFEMA = false;
+                RiesgoTP3TPFEMA = 100;
+                ValorTickTP3TPFEMA = 12.50;
+                TicksDeslizamientoTP3TPFEMA = 2;
+                TipoStopLossTP3TPFEMA = 0;
+                RelacionRiesgoTP3TPFEMA = 1;
+                RelacionBeneficioTP3TPFEMA = 2;
+                LogsTP3TPFEMA = true;
+                
+                ActivarTrailingStopTPFEMA = true;
+                TrailingActivacionTicksTPFEMA = 15;
+                TrailingMovimientoTicksTPFEMA = 10;
+                
+                LogsDetalladosTPFEMA = true;
+                FrecuenciaLogMinutosTPFEMA = 5;
+                LogsZonasTPFEMA = true;
+                LogsPatronesTPFEMA = true;
+                LogsOperacionesTPFEMA = true;
+                
+                DibujarBloquesTPFEMA = true;
+                DibujarZonasPremiumTPFEMA = true;
+                DibujarSenalesTPFEMA = true;
+                
+                MaximoBloquesTPFEMA = 50;
+                
+                ActivarFiltroEMATPFEMA = false;
+                PeriodoEMATPFEMA = 500;
+                ToleranciaEMATicksTPFEMA = 10;
+                DibujarEMATPFEMA = true;
+            }
+            else if (State == State.Configure)
+            {
+            }
+            else if (State == State.DataLoaded)
+            {
+                zonasActivasTPFEMA = new List<ZonaTPFEMA>();
+                historialBloquesTPFEMA = new List<BloqueTPFEMA>();
+                intervalMinutosTPFEMA = IntervaloBloqueTPFEMA;
+                ultimoLogTPFEMA = DateTime.MinValue;
+                operacionEnCursoTPFEMA = false;
+                ultimaBarraProcesadaTPFEMA = -1;
+                bloqueAnteriorTPFEMA = null;
+                
+                if (ActivarFiltroEMATPFEMA)
+                {
+                    emaFiltroTPFEMA = EMA(PeriodoEMATPFEMA);
+                    emaFiltroTPFEMA.Plots[0].Brush = Brushes.Orange;
+                    emaFiltroTPFEMA.Plots[0].Width = 2;
+                    
+                    if (DibujarEMATPFEMA)
+                    {
+                        AddChartIndicator(emaFiltroTPFEMA);
+                    }
+                }
+                
+                LogEncabezadoTPFEMA();
+            }
+        }
+
+        protected override void OnBarUpdate()
+        {
+            if (CurrentBar < 2) return;
+
+            if (operacionEnCursoTPFEMA && operacionActualTPFEMA != null)
+            {
+                VerificarStopsYTargetsTPFEMA();
+            }
+
+            if (CurrentBar == ultimaBarraProcesadaTPFEMA) return;
+            ultimaBarraProcesadaTPFEMA = CurrentBar;
+
+            DateTime tiempoActual = Time[0];
+
+            VerificarZonasAtravesadasTPFEMA();
+            EvaluarYLimpiarZonasExpiradasTPFEMA(tiempoActual);
+
+            if ((tiempoActual - ultimoLogTPFEMA).TotalMinutes >= FrecuenciaLogMinutosTPFEMA)
+            {
+                LogEstadoGeneralTPFEMA(tiempoActual);
+                ultimoLogTPFEMA = tiempoActual;
+            }
+
+            if (ActivarDeteccionPatronesTPFEMA)
+            {
+                DetectarPatronesEnZonasTPFEMA();
+            }
+
+            if (bloqueActualTPFEMA == null || tiempoActual >= bloqueActualTPFEMA.Fin)
+            {
+                if (bloqueActualTPFEMA != null)
+                {
+                    bloqueActualTPFEMA.EsAlcista = bloqueActualTPFEMA.TiempoHigh > bloqueActualTPFEMA.TiempoLow;
+                    
+                    LogFinalizacionBloqueTPFEMA(bloqueActualTPFEMA);
+                    
+                    ProcesarZonaDinamicaTPFEMA(bloqueActualTPFEMA);
+                    
+                    historialBloquesTPFEMA.Add(bloqueActualTPFEMA);
+                    
+                    if (DibujarBloquesTPFEMA)
+                        DibujarBloqueTPFEMA(bloqueActualTPFEMA);
+                    
+                    LimpiarAntiguosTPFEMA();
+                    
+                    bloqueAnteriorTPFEMA = bloqueActualTPFEMA;
+                }
+
+                CrearNuevoBloqueTPFEMA(tiempoActual);
+                LogInicioBloqueTPFEMA(bloqueActualTPFEMA);
+            }
+            else
+            {
+                ActualizarBloqueActualTPFEMA();
+            }
+        }
+
+        protected override void OnOrderUpdate(Order order, double limitPrice, double stopPrice, 
+            int quantity, int filled, double averageFillPrice, OrderState orderState, 
+            DateTime time, ErrorCode error, string nativeError)
+        {
+            if (operacionActualTPFEMA == null) return;
+
+            if (order.Name == "EntryTP1")
+                operacionActualTPFEMA.OrdenEntradaTP1 = order;
+            else if (order.Name == "EntryTP2")
+                operacionActualTPFEMA.OrdenEntradaTP2 = order;
+            else if (order.Name == "EntryTP3")
+                operacionActualTPFEMA.OrdenEntradaTP3 = order;
+
+            if (orderState == OrderState.Filled)
+            {
+                if (order.Name == "EntryTP1")
+                {
+                    operacionActualTPFEMA.OrdenTP1Llena = true;
+                    if (LogsOperacionesTPFEMA)
+                        Print($"✓ TP1 Llenada: {filled} contratos @ {averageFillPrice:F2}");
+                }
+                else if (order.Name == "EntryTP2")
+                {
+                    operacionActualTPFEMA.OrdenTP2Llena = true;
+                    if (LogsOperacionesTPFEMA)
+                        Print($"✓ TP2 Llenada: {filled} contratos @ {averageFillPrice:F2}");
+                    
+                    if (!UsarTP1TPFEMA && UsarTP2TPFEMA && ActivarTrailingStopTPFEMA)
+                    {
+                        operacionActualTPFEMA.TrailingActivo = true;
+                        operacionActualTPFEMA.TP1Ejecutado = true;
+                        operacionActualTPFEMA.UltimoStopTrailing = operacionActualTPFEMA.PrecioStopLoss;
+                        if (LogsOperacionesTPFEMA)
+                            Print($"✓ Trailing Stop ACTIVADO desde Stop Loss: {operacionActualTPFEMA.PrecioStopLoss:F2}");
+                    }
+                }
+                else if (order.Name == "EntryTP3")
+                {
+                    operacionActualTPFEMA.OrdenTP3Llena = true;
+                    if (LogsTP3TPFEMA)
+                        Print($"✓ TP3 Llenada: {filled} contratos @ {averageFillPrice:F2}");
+                }
+                
+                if (!operacionEnCursoTPFEMA)
+                {
+                    operacionEnCursoTPFEMA = true;
+                    if (LogsOperacionesTPFEMA)
+                        Print($"✓ OPERACIÓN ACTIVADA - Órdenes confirmadas");
+                }
+            }
+
+            if (orderState == OrderState.Rejected)
+            {
+                Print($"⚠️ ORDEN RECHAZADA: {order.Name} - {error} - {nativeError}");
+            }
+            
+            if (orderState == OrderState.Cancelled)
+            {
+                if (LogsOperacionesTPFEMA)
+                    Print($"⚪ Orden cancelada: {order.Name}");
+            }
+        }
+
+        #region Gestión de Bloques
+        private void CrearNuevoBloqueTPFEMA(DateTime tiempoActual)
+        {
+            contadorBloquesTPFEMA++;
+            
+            bloqueActualTPFEMA = new BloqueTPFEMA
+            {
+                NumeroBloque = contadorBloquesTPFEMA,
+                Inicio = IniciarEnHoraTPFEMA ? AlinearTiempoTPFEMA(tiempoActual) : tiempoActual,
+                High = High[0],
+                Low = Low[0],
+                TiempoHigh = Time[0],
+                TiempoLow = Time[0]
+            };
+            
+            bloqueActualTPFEMA.Fin = bloqueActualTPFEMA.Inicio.AddMinutes(intervalMinutosTPFEMA);
+        }
+
+        private DateTime AlinearTiempoTPFEMA(DateTime tiempo)
+        {
+            int minutos = intervalMinutosTPFEMA;
+            return new DateTime(tiempo.Year, tiempo.Month, tiempo.Day, 
+                               tiempo.Hour, (tiempo.Minute / minutos) * minutos, 0);
+        }
+
+        private void ActualizarBloqueActualTPFEMA()
+        {
+            if (High[0] > bloqueActualTPFEMA.High)
+            {
+                bloqueActualTPFEMA.High = High[0];
+                bloqueActualTPFEMA.TiempoHigh = Time[0];
+            }
+            
+            if (Low[0] < bloqueActualTPFEMA.Low)
+            {
+                bloqueActualTPFEMA.Low = Low[0];
+                bloqueActualTPFEMA.TiempoLow = Time[0];
+            }
+        }
+        #endregion
+
+        #region Zonas Premium Dinámicas
+        private void ProcesarZonaDinamicaTPFEMA(BloqueTPFEMA bloqueNuevo)
+        {
+            bool esAlcista = bloqueNuevo.EsAlcista;
+            
+            if (bloqueAnteriorTPFEMA == null)
+            {
+                CrearNuevaZonaTPFEMA(bloqueNuevo, null);
+                return;
+            }
+            
+            bool cambioTendencia = bloqueAnteriorTPFEMA.EsAlcista != esAlcista;
+            
+            if (cambioTendencia)
+            {
+                CrearNuevaZonaTPFEMA(bloqueNuevo, bloqueAnteriorTPFEMA);
+                
+                if (CancelarPorSuperposicionTPFEMA)
+                {
+                    VerificarYCancelarSuperposicionesTPFEMA();
+                }
+            }
+            else
+            {
+                RecalcularZonaActivaTPFEMA(bloqueNuevo, bloqueAnteriorTPFEMA);
+            }
+        }
+
+        private void CrearNuevaZonaTPFEMA(BloqueTPFEMA bloqueActual, BloqueTPFEMA bloqueAnterior)
+        {
+            contadorZonasTPFEMA++;
+            
+            var nuevaZona = new ZonaTPFEMA
+            {
+                Id = contadorZonasTPFEMA,
+                FechaCreacion = bloqueActual.Fin,
+                FechaUltimaActualizacion = bloqueActual.Fin,
+                FechaExpiracion = bloqueActual.Fin.AddMinutes(DuracionMaximaZonaMinutosTPFEMA),
+                EsAlcista = bloqueActual.EsAlcista,
+                EstadoZ = 0,
+                BloqueInicialId = bloqueActual.NumeroBloque,
+                BloqueActualId = bloqueActual.NumeroBloque,
+                TagVisualizacion = "ZonaTPFEMA_" + contadorZonasTPFEMA
+            };
+            
+            CalcularLimitesZonaTPFEMA(nuevaZona, bloqueActual, bloqueAnterior);
+            
+            zonasActivasTPFEMA.Add(nuevaZona);
+            
+            if (DibujarZonasPremiumTPFEMA)
+            {
+                DibujarZonaPremiumTPFEMA(nuevaZona, bloqueActual.Fin);
+            }
+            
+            if (LogsZonasTPFEMA)
+            {
+                LogCreacionZonaTPFEMA(nuevaZona, bloqueActual, bloqueAnterior);
+            }
+        }
+
+        private void RecalcularZonaActivaTPFEMA(BloqueTPFEMA bloqueNuevo, BloqueTPFEMA bloqueAnterior)
+        {
+            var zonaActiva = zonasActivasTPFEMA
+                .Where(z => (z.EstadoZ == 0 || z.EstadoZ == 1) && z.EsAlcista == bloqueNuevo.EsAlcista)
+                .OrderByDescending(z => z.FechaUltimaActualizacion)
+                .FirstOrDefault();
+            
+            if (zonaActiva == null)
+            {
+                CrearNuevaZonaTPFEMA(bloqueNuevo, bloqueAnterior);
+                return;
+            }
+            
+            bool debeRecalcular = false;
+            
+            if (bloqueNuevo.EsAlcista)
+            {
+                if (bloqueNuevo.High > zonaActiva.PuntoActual)
+                {
+                    debeRecalcular = true;
+                }
+            }
+            else
+            {
+                if (bloqueNuevo.Low < zonaActiva.PuntoActual)
+                {
+                    debeRecalcular = true;
+                }
+            }
+            
+            if (!debeRecalcular)
+            {
+                if (LogsZonasTPFEMA)
+                {
+                    string tendencia = zonaActiva.EsAlcista ? "Alcista" : "Bajista";
+                    Print($"\n⚪ ZONA #{zonaActiva.Id} SIN CAMBIOS - Bloque #{bloqueNuevo.NumeroBloque} es interno");
+                    Print($"   Zona {tendencia} se mantiene: [{zonaActiva.LimiteInferior:F2} - {zonaActiva.LimiteSuperior:F2}]");
+                }
+                
+                zonaActiva.FechaExpiracion = bloqueNuevo.Fin.AddMinutes(DuracionMaximaZonaMinutosTPFEMA);
+                return;
+            }
+            
+            double limInfAnterior = zonaActiva.LimiteInferior;
+            double limSupAnterior = zonaActiva.LimiteSuperior;
+            double puntoExtremoAnterior = zonaActiva.PuntoExtremo;
+            double puntoActualAnterior = zonaActiva.PuntoActual;
+            
+            if (zonaActiva.EsAlcista)
+            {
+                zonaActiva.PuntoActual = bloqueNuevo.High;
+            }
+            else
+            {
+                zonaActiva.PuntoActual = bloqueNuevo.Low;
+            }
+            
+            CalcularLimitesZonaTPFEMA(zonaActiva);
+            
+            zonaActiva.FechaUltimaActualizacion = bloqueNuevo.Fin;
+            zonaActiva.FechaExpiracion = bloqueNuevo.Fin.AddMinutes(DuracionMaximaZonaMinutosTPFEMA);
+            zonaActiva.BloqueActualId = bloqueNuevo.NumeroBloque;
+            zonaActiva.NumeroRecalculos++;
+            zonaActiva.EstadoZ = 1;
+            
+            zonaActiva.Recalculos.Add(new RecalculoTPFEMA
+            {
+                Fecha = bloqueNuevo.Fin,
+                BloqueId = bloqueNuevo.NumeroBloque,
+                LimiteInferiorAnterior = limInfAnterior,
+                LimiteSuperiorAnterior = limSupAnterior,
+                LimiteInferiorNuevo = zonaActiva.LimiteInferior,
+                LimiteSuperiorNuevo = zonaActiva.LimiteSuperior,
+                Motivo = "Extensión de zona - Nuevo extremo alcanzado"
+            });
+            
+            if (DibujarZonasPremiumTPFEMA)
+            {
+                RemoveDrawObject(zonaActiva.TagVisualizacion);
+                RemoveDrawObject(zonaActiva.TagVisualizacion + "_Rect");
+                DibujarZonaPremiumTPFEMA(zonaActiva, bloqueNuevo.Fin);
+            }
+            
+            if (LogsZonasTPFEMA)
+            {
+                LogRecalculoZonaTPFEMA(zonaActiva, bloqueNuevo, limInfAnterior, limSupAnterior, puntoExtremoAnterior, puntoActualAnterior);
+            }
+        }
+
+        private void CalcularLimitesZonaTPFEMA(ZonaTPFEMA zona, BloqueTPFEMA bloqueActual, BloqueTPFEMA bloqueAnterior)
+        {
+            double puntoExtremo, puntoActual;
+            
+            if (zona.EsAlcista)
+            {
+                if (bloqueAnterior != null)
+                {
+                    puntoExtremo = Math.Min(bloqueAnterior.Low, bloqueActual.Low);
+                }
+                else
+                {
+                    puntoExtremo = bloqueActual.Low;
+                }
+                
+                puntoActual = bloqueActual.High;
+                
+                double distanciaTicks = (puntoActual - puntoExtremo) / TickSize;
+                double umbralTicks = distanciaTicks * (UmbralZonaPctTPFEMA / 100.0);
+                
+                zona.LimiteInferior = puntoExtremo;
+                zona.LimiteSuperior = puntoExtremo + (umbralTicks * TickSize);
+                zona.PuntoExtremo = puntoExtremo;
+                zona.PuntoActual = puntoActual;
+            }
+            else
+            {
+                if (bloqueAnterior != null)
+                {
+                    puntoExtremo = Math.Max(bloqueAnterior.High, bloqueActual.High);
+                }
+                else
+                {
+                    puntoExtremo = bloqueActual.High;
+                }
+                
+                puntoActual = bloqueActual.Low;
+                
+                double distanciaTicks = (puntoExtremo - puntoActual) / TickSize;
+                double umbralTicks = distanciaTicks * (UmbralZonaPctTPFEMA / 100.0);
+                
+                zona.LimiteSuperior = puntoExtremo;
+                zona.LimiteInferior = puntoExtremo - (umbralTicks * TickSize);
+                zona.PuntoExtremo = puntoExtremo;
+                zona.PuntoActual = puntoActual;
+            }
+        }
+
+        private void CalcularLimitesZonaTPFEMA(ZonaTPFEMA zona)
+        {
+            if (zona.EsAlcista)
+            {
+                double distanciaTicks = (zona.PuntoActual - zona.PuntoExtremo) / TickSize;
+                double umbralTicks = distanciaTicks * (UmbralZonaPctTPFEMA / 100.0);
+                
+                zona.LimiteInferior = zona.PuntoExtremo;
+                zona.LimiteSuperior = zona.PuntoExtremo + (umbralTicks * TickSize);
+            }
+            else
+            {
+                double distanciaTicks = (zona.PuntoExtremo - zona.PuntoActual) / TickSize;
+                double umbralTicks = distanciaTicks * (UmbralZonaPctTPFEMA / 100.0);
+                
+                zona.LimiteSuperior = zona.PuntoExtremo;
+                zona.LimiteInferior = zona.PuntoExtremo - (umbralTicks * TickSize);
+            }
+        }
+
+        private void VerificarYCancelarSuperposicionesTPFEMA()
+        {
+            var zonasActivas = zonasActivasTPFEMA.Where(z => z.EstadoZ == 0 || z.EstadoZ == 1).ToList();
+            
+            if (zonasActivas.Count < 2) return;
+            
+            var zonaNueva = zonasActivas[zonasActivas.Count - 1];
+            
+            for (int i = zonasActivas.Count - 2; i >= 0; i--)
+            {
+                var zonaAntigua = zonasActivas[i];
+                
+                if (zonaNueva.SeSuperpone(zonaAntigua))
+                {
+                    zonaAntigua.EstadoZ = 2;
+                    
+                    if (LogsZonasTPFEMA)
+                    {
+                        Print($"\n❌ ZONA #{zonaAntigua.Id} CANCELADA POR SUPERPOSICIÓN");
+                        Print($"   Superpuesta con Zona #{zonaNueva.Id}");
+                    }
+                    
+                    if (DibujarZonasPremiumTPFEMA)
+                    {
+                        RemoveDrawObject(zonaAntigua.TagVisualizacion);
+                        RemoveDrawObject(zonaAntigua.TagVisualizacion + "_Rect");
+                    }
+                }
+            }
+        }
+
+        private void EvaluarYLimpiarZonasExpiradasTPFEMA(DateTime tiempoActual)
+        {
+            var zonasParaExpirar = zonasActivasTPFEMA
+                .Where(z => (z.EstadoZ == 0 || z.EstadoZ == 1) && z.EstaExpirada(tiempoActual))
+                .ToList();
+            
+            foreach (var zona in zonasParaExpirar)
+            {
+                zona.EstadoZ = 3;
+                
+                if (LogsZonasTPFEMA)
+                {
+                    Print($"\n⏰ ZONA #{zona.Id} EXPIRADA");
+                    Print($"   Creada: {zona.FechaCreacion:yyyy-MM-dd HH:mm}");
+                    Print($"   Expiración: {zona.FechaExpiracion:yyyy-MM-dd HH:mm}");
+                    Print($"   Duración: {(tiempoActual - zona.FechaCreacion).TotalMinutes:F0} minutos");
+                }
+            }
+            
+            if (LimpiarZonasExpiradasTPFEMA)
+            {
+                var zonasAEliminar = zonasActivasTPFEMA
+                    .Where(z => z.EstadoZ == 3 || z.EstadoZ == 2 || z.EstadoZ == 4)
+                    .ToList();
+                
+                foreach (var zona in zonasAEliminar)
+                {
+                    RemoveDrawObject(zona.TagVisualizacion);
+                    RemoveDrawObject(zona.TagVisualizacion + "_Rect");
+                    
+                    zonasActivasTPFEMA.Remove(zona);
+                }
+                
+                if (zonasAEliminar.Count > 0 && LogsZonasTPFEMA)
+                {
+                    Print($"   ✓ {zonasAEliminar.Count} zonas expiradas/canceladas/invalidadas eliminadas");
+                }
+            }
+        }
+        
+        private void VerificarZonasAtravesadasTPFEMA()
+        {
+            double precioActualHigh = High[0];
+            double precioActualLow = Low[0];
+            
+            var zonasActivas = zonasActivasTPFEMA.Where(z => z.EstadoZ == 0 || z.EstadoZ == 1).ToList();
+            
+            foreach (var zona in zonasActivas)
+            {
+                bool zonaInvalidada = false;
+                string motivo = "";
+                
+                if (zona.EsAlcista)
+                {
+                    if (precioActualLow < zona.LimiteInferior)
+                    {
+                        zonaInvalidada = true;
+                        motivo = $"Precio atravesó zona hacia abajo (LOW: {precioActualLow:F2} < Límite: {zona.LimiteInferior:F2})";
+                    }
+                }
+                else
+                {
+                    if (precioActualHigh > zona.LimiteSuperior)
+                    {
+                        zonaInvalidada = true;
+                        motivo = $"Precio atravesó zona hacia arriba (HIGH: {precioActualHigh:F2} > Límite: {zona.LimiteSuperior:F2})";
+                    }
+                }
+                
+                if (zonaInvalidada)
+                {
+                    zona.EstadoZ = 4;
+                    
+                    if (LogsZonasTPFEMA)
+                    {
+                        string tipoZona = zona.EsAlcista ? "Alcista" : "Bajista";
+                        Print($"\n⚠️ ZONA {tipoZona} #{zona.Id} INVALIDADA");
+                        Print($"   {motivo}");
+                        Print($"   Zona: [{zona.LimiteInferior:F2} - {zona.LimiteSuperior:F2}]");
+                    }
+                    
+                    if (DibujarZonasPremiumTPFEMA)
+                    {
+                        RemoveDrawObject(zona.TagVisualizacion);
+                        RemoveDrawObject(zona.TagVisualizacion + "_Rect");
+                    }
+                }
+            }
+        }
+        #endregion
+
+        #region Detección de Patrones
+        private void DetectarPatronesEnZonasTPFEMA()
+        {
+            if (operacionEnCursoTPFEMA) return;
+
+            foreach (var zona in zonasActivasTPFEMA.Where(z => z.EstadoZ == 0 || z.EstadoZ == 1))
+            {
+                if (!zona.EsAlcista)
+                {
+                    if (Close[0] >= Open[0]) continue;
+                    
+                    if (DetectarPatronShortTPFEMA(zona))
+                    {
+                        RegistrarSenalTPFEMA(zona, false);
+                    }
+                }
+                else
+                {
+                    if (Close[0] <= Open[0]) continue;
+                    
+                    if (DetectarPatronLongTPFEMA(zona))
+                    {
+                        RegistrarSenalTPFEMA(zona, true);
+                    }
+                }
+            }
+        }
+
+        private bool DetectarPatronShortTPFEMA(ZonaTPFEMA zona)
+        {
+            int velasAlcistasRequeridas = NVelasAlcistasPatronBajistaTPFEMA;
+            int velasBajistasRequeridas = NVelasBajistasPatronBajistaTPFEMA;
+            int totalVelas = velasAlcistasRequeridas + velasBajistasRequeridas;
+            
+            if (CurrentBar < totalVelas) return false;
+            
+            for (int i = 0; i < velasBajistasRequeridas; i++)
+            {
+                if (Close[i] >= Open[i]) return false;
+            }
+            
+            for (int i = velasBajistasRequeridas; i < totalVelas; i++)
+            {
+                if (Close[i] <= Open[i]) return false;
+            }
+            
+            int indiceVelaReversion = velasBajistasRequeridas;
+            
+            bool velaEnZona = (High[indiceVelaReversion] <= zona.LimiteSuperior) && 
+                              (Low[indiceVelaReversion] >= zona.LimiteInferior);
+            
+            if (!velaEnZona)
+            {
+                if (LogsPatronesTPFEMA)
+                {
+                    Print($"\n❌ PATRÓN SHORT RECHAZADO - Vela reversión fuera de zona #{zona.Id}");
+                }
+                return false;
+            }
+            
+            if (LogsPatronesTPFEMA)
+            {
+                Print($"\n✓ PATRON SHORT DETECTADO - Zona #{zona.Id}");
+            }
+            
+            return true;
+        }
+
+        private bool DetectarPatronLongTPFEMA(ZonaTPFEMA zona)
+        {
+            int velasBajistasRequeridas = NVelasBajistasPatronAlcistaTPFEMA;
+            int velasAlcistasRequeridas = NVelasAlcistasPatronAlcistaTPFEMA;
+            int totalVelas = velasBajistasRequeridas + velasAlcistasRequeridas;
+            
+            if (CurrentBar < totalVelas) return false;
+            
+            for (int i = 0; i < velasAlcistasRequeridas; i++)
+            {
+                if (Close[i] <= Open[i]) return false;
+            }
+            
+            for (int i = velasAlcistasRequeridas; i < totalVelas; i++)
+            {
+                if (Close[i] >= Open[i]) return false;
+            }
+            
+            int indiceVelaReversion = velasAlcistasRequeridas;
+            
+            bool velaEnZona = (High[indiceVelaReversion] <= zona.LimiteSuperior) && 
+                              (Low[indiceVelaReversion] >= zona.LimiteInferior);
+            
+            if (!velaEnZona)
+            {
+                if (LogsPatronesTPFEMA)
+                {
+                    Print($"\n❌ PATRÓN LONG RECHAZADO - Vela reversión fuera de zona #{zona.Id}");
+                }
+                return false;
+            }
+            
+            if (LogsPatronesTPFEMA)
+            {
+                Print($"\n✓ PATRON LONG DETECTADO - Zona #{zona.Id}");
+            }
+            
+            return true;
+        }
+        
+        private bool ValidarFiltroEMATPFEMA(bool esAlcista, double precioSenal)
+        {
+            if (!ActivarFiltroEMATPFEMA) return true;
+            
+            if (CurrentBar < PeriodoEMATPFEMA) return false;
+            
+            double valorEMA = emaFiltroTPFEMA[0];
+            double toleranciaPrecio = ToleranciaEMATicksTPFEMA * TickSize;
+            
+            double limiteInferiorTolerancia = valorEMA - toleranciaPrecio;
+            double limiteSuperiorTolerancia = valorEMA + toleranciaPrecio;
+            
+            bool enZonaTolerancia = (precioSenal >= limiteInferiorTolerancia && 
+                                      precioSenal <= limiteSuperiorTolerancia);
+            
+            if (enZonaTolerancia)
+            {
+                if (LogsPatronesTPFEMA)
+                {
+                    string direccion = esAlcista ? "LONG" : "SHORT";
+                    Print($"   ✓ {direccion} EN ZONA TOLERANCIA (EMA: {valorEMA:F2}, Precio: {precioSenal:F2})");
+                }
+                return true;
+            }
+            
+            if (esAlcista)
+            {
+                bool valido = precioSenal > valorEMA;
+                
+                if (!valido && LogsPatronesTPFEMA)
+                {
+                    Print($"   ❌ LONG RECHAZADO por filtro EMA");
+                    Print($"      Precio: {precioSenal:F2} | EMA: {valorEMA:F2}");
+                    Print($"      El precio debe estar por encima de EMA para LONGs");
+                }
+                
+                return valido;
+            }
+            else
+            {
+                bool valido = precioSenal < valorEMA;
+                
+                if (!valido && LogsPatronesTPFEMA)
+                {
+                    Print($"   ❌ SHORT RECHAZADO por filtro EMA");
+                    Print($"      Precio: {precioSenal:F2} | EMA: {valorEMA:F2}");
+                    Print($"      El precio debe estar por debajo de EMA para SHORTs");
+                }
+                
+                return valido;
+            }
+        }
+
+        private void RegistrarSenalTPFEMA(ZonaTPFEMA zona, bool esAlcista)
+        {
+            double precioSenal = esAlcista 
+                ? (zona.PrecioEnZona(Low[0]) ? Low[0] : zona.LimiteSuperior)
+                : (zona.PrecioEnZona(High[0]) ? High[0] : zona.LimiteInferior);
+            
+            if (!ValidarFiltroEMATPFEMA(esAlcista, precioSenal))
+            {
+                return;
+            }
+            
+            contadorSenalesTPFEMA++;
+            
+            var senal = new SenalOperacionTPFEMA
+            {
+                Id = contadorSenalesTPFEMA,
+                Fecha = Time[0],
+                ZonaId = zona.Id,
+                EsAlcista = esAlcista,
+                PrecioSenal = precioSenal,
+                BarIndex = CurrentBar,
+                PatronCompleto = true,
+                OperacionEjecutada = false,
+                HighVelaEntrada = High[0],
+                LowVelaEntrada = Low[0]
+            };
+            
+            zona.Senales.Add(senal);
+            
+            if (DibujarSenalesTPFEMA)
+            {
+                DibujarSenalOperacionTPFEMA(senal);
+            }
+            
+            LogSenalDetectadaTPFEMA(senal, zona);
+            
+            if (ActivarTradingTPFEMA && !operacionEnCursoTPFEMA)
+            {
+                EjecutarOperacionTPFEMA(senal, zona);
+            }
+        }
+        #endregion
+
+        #region Gestión de Operaciones (CONTINÚA EN SIGUIENTE MENSAJE)
+        private void EjecutarOperacionTPFEMA(SenalOperacionTPFEMA senal, ZonaTPFEMA zona)
+        {
+            if (operacionEnCursoTPFEMA) return;
+
+            contadorOperacionesTPFEMA++;
+            
+            // Cálculo de contratos para TP1 y TP2
+            int contratosTP1 = 0;
+            int contratosTP2 = 0;
+            
+            if (UsarTP1TPFEMA && UsarTP2TPFEMA)
+            {
+                contratosTP1 = (int)Math.Floor(ContratosTotalTPFEMA * (PorcentajeTP1TPFEMA / 100.0));
+                contratosTP2 = ContratosTotalTPFEMA - contratosTP1;
+            }
+            else if (UsarTP1TPFEMA && !UsarTP2TPFEMA)
+            {
+                contratosTP1 = ContratosTotalTPFEMA;
+                contratosTP2 = 0;
+            }
+            else if (!UsarTP1TPFEMA && UsarTP2TPFEMA)
+            {
+                contratosTP1 = 0;
+                contratosTP2 = ContratosTotalTPFEMA;
+            }
+            else
+            {
+                if (LogsOperacionesTPFEMA)
+                {
+                    Print($"⚠️ ERROR: Debe activar al menos TP1 o TP2");
+                }
+                
+                if (!UsarTP3TPFEMA)
+                    return;
+            }
+            
+            // ========== CÁLCULO COMPLETO PARA TP3 ==========
+            int contratosTP3 = 0;
+            double precioStopLossTP3 = 0;
+            double precioTP3 = 0;
+            int ticksStopLossTP3 = 0;
+            
+            if (UsarTP3TPFEMA)
+            {
+                double extremoStopLoss = 0;
+                
+                // Determinar extremo según tipo de Stop Loss
+                if (TipoStopLossTP3TPFEMA == 0)
+                {
+                    // Tipo 0: Extremo de la vela de entrada
+                    extremoStopLoss = senal.EsAlcista ? senal.LowVelaEntrada : senal.HighVelaEntrada;
+                }
+                else
+                {
+                    // Tipo 1: Extremo de la zona
+                    extremoStopLoss = senal.EsAlcista ? zona.LimiteInferior : zona.LimiteSuperior;
+                }
+                
+                // Calcular Stop Loss con deslizamiento
+                if (senal.EsAlcista)
+                {
+                    // LONG: Stop Loss abajo del extremo
+                    precioStopLossTP3 = extremoStopLoss - (TicksDeslizamientoTP3TPFEMA * TickSize);
+                    ticksStopLossTP3 = (int)Math.Round((senal.PrecioSenal - precioStopLossTP3) / TickSize);
+                }
+                else
+                {
+                    // SHORT: Stop Loss arriba del extremo
+                    precioStopLossTP3 = extremoStopLoss + (TicksDeslizamientoTP3TPFEMA * TickSize);
+                    ticksStopLossTP3 = (int)Math.Round((precioStopLossTP3 - senal.PrecioSenal) / TickSize);
+                }
+                
+                // Cálculo de contratos: Riesgo / (ValorTick * TicksStopLoss)
+                double divisor = ValorTickTP3TPFEMA * ticksStopLossTP3;
+                
+                if (divisor > 0)
+                {
+                    contratosTP3 = (int)Math.Floor(RiesgoTP3TPFEMA / divisor);
+                    
+                    if (contratosTP3 < 1)
+                    {
+                        if (LogsTP3TPFEMA)
+                        {
+                            Print($"⚠️ TP3: Contratos calculados < 1. Ajustando a 1 contrato");
+                            Print($"   Riesgo: ${RiesgoTP3TPFEMA:F2} | Valor Tick: ${ValorTickTP3TPFEMA:F2} | SL Ticks: {ticksStopLossTP3}");
+                        }
+                        contratosTP3 = 1;
+                    }
+                }
+                else
+                {
+                    if (LogsTP3TPFEMA)
+                        Print($"⚠️ TP3: Error en cálculo de contratos. Divisor = 0");
+                    contratosTP3 = 0;
+                }
+                
+                // Cálculo de TP3 usando relación Riesgo:Beneficio
+                double ticksBeneficioTP3 = (ticksStopLossTP3 * RelacionBeneficioTP3TPFEMA) / (double)RelacionRiesgoTP3TPFEMA;
+                
+                if (senal.EsAlcista)
+                {
+                    precioTP3 = senal.PrecioSenal + (ticksBeneficioTP3 * TickSize);
+                }
+                else
+                {
+                    precioTP3 = senal.PrecioSenal - (ticksBeneficioTP3 * TickSize);
+                }
+            }
+            
+            // Cálculo de precios para TP1 y TP2
+            double precioEntrada = senal.PrecioSenal;
+            double precioStopLoss, precioTP1, precioTP2;
+            double riesgoTicks = StopLossTicksTPFEMA;
+            double beneficioTP2Ticks = riesgoTicks * RelacionRiesgoTP2TPFEMA;
+            
+            if (senal.EsAlcista)
+            {
+                precioStopLoss = precioEntrada - (StopLossTicksTPFEMA * TickSize);
+                precioTP1 = precioEntrada + (TakeProfit1TicksTPFEMA * TickSize);
+                precioTP2 = precioEntrada + (beneficioTP2Ticks * TickSize);
+                
+                if (contratosTP1 > 0) EnterLong(contratosTP1, "EntryTP1");
+                if (contratosTP2 > 0) EnterLong(contratosTP2, "EntryTP2");
+                if (contratosTP3 > 0) EnterLong(contratosTP3, "EntryTP3");
+            }
+            else
+            {
+                precioStopLoss = precioEntrada + (StopLossTicksTPFEMA * TickSize);
+                precioTP1 = precioEntrada - (TakeProfit1TicksTPFEMA * TickSize);
+                precioTP2 = precioEntrada - (beneficioTP2Ticks * TickSize);
+                
+                if (contratosTP1 > 0) EnterShort(contratosTP1, "EntryTP1");
+                if (contratosTP2 > 0) EnterShort(contratosTP2, "EntryTP2");
+                if (contratosTP3 > 0) EnterShort(contratosTP3, "EntryTP3");
+            }
+            
+            operacionActualTPFEMA = new OperacionActivaTPFEMA
+            {
+                Id = contadorOperacionesTPFEMA,
+                FechaApertura = Time[0],
+                EsAlcista = senal.EsAlcista,
+                PrecioEntrada = precioEntrada,
+                ContratosTotal = ContratosTotalTPFEMA,
+                ContratosTP1 = contratosTP1,
+                ContratosTP2 = contratosTP2,
+                ContratosTP3 = contratosTP3,
+                PrecioStopLoss = precioStopLoss,
+                PrecioTP1 = precioTP1,
+                PrecioTP2 = precioTP2,
+                PrecioTP3 = precioTP3,
+                PrecioStopLossTP3 = precioStopLossTP3,
+                TicksStopLossTP3 = ticksStopLossTP3,
+                EstadoOp = 0,
+                TP1Ejecutado = false,
+                TP2Ejecutado = false,
+                TP3Ejecutado = false,
+                TrailingActivo = false,
+                UltimoStopTrailing = precioStopLoss,
+                ZonaId = zona.Id,
+                SenalId = senal.Id,
+                OrdenTP1Llena = false,
+                OrdenTP2Llena = false,
+                OrdenTP3Llena = false
+            };
+            
+            if (!UsarTP1TPFEMA && UsarTP2TPFEMA && ActivarTrailingStopTPFEMA)
+            {
+                operacionActualTPFEMA.TrailingActivo = true;
+                operacionActualTPFEMA.TP1Ejecutado = true;
+                operacionActualTPFEMA.UltimoStopTrailing = precioStopLoss;
+            }
+            
+            senal.OperacionEjecutada = true;
+            
+            LogAperturaOperacionTPFEMA(operacionActualTPFEMA, zona);
+        }
+
+        private void VerificarStopsYTargetsTPFEMA()
+        {
+            if (operacionActualTPFEMA == null || !operacionEnCursoTPFEMA) return;
+            
+            if (!operacionActualTPFEMA.OrdenTP1Llena && !operacionActualTPFEMA.OrdenTP2Llena && !operacionActualTPFEMA.OrdenTP3Llena)
+            {
+                return;
+            }
+            
+            double precioActual = Close[0];
+            
+            if (operacionActualTPFEMA.EsAlcista)
+            {
+                // ========== VERIFICACIÓN PARA TP3 (INDEPENDIENTE) ==========
+                if (UsarTP3TPFEMA && operacionActualTPFEMA.ContratosTP3 > 0 && !operacionActualTPFEMA.TP3Ejecutado)
+                {
+                    // Verificar TP3
+                    if (precioActual >= operacionActualTPFEMA.PrecioTP3)
+                    {
+                        if (operacionActualTPFEMA.OrdenTP3Llena)
+                        {
+                            ExitLong(0, operacionActualTPFEMA.ContratosTP3, "TP3", "EntryTP3");
+                            operacionActualTPFEMA.TP3Ejecutado = true;
+                            
+                            if (LogsTP3TPFEMA)
+                            {
+                                Print($"\n🎯 TP3 ALCANZADO");
+                                Print($"   Contratos: {operacionActualTPFEMA.ContratosTP3}");
+                                Print($"   Precio: {operacionActualTPFEMA.PrecioTP3:F2}");
+                            }
+                            
+                            // Verificar si toda la operación debe cerrarse
+                            bool tp1Completo = !UsarTP1TPFEMA || operacionActualTPFEMA.TP1Ejecutado;
+                            bool tp2Completo = !UsarTP2TPFEMA || operacionActualTPFEMA.TP2Ejecutado;
+                            
+                            if (tp1Completo && tp2Completo)
+                            {
+                                FinalizarOperacionTPFEMA("TP3 Alcanzado - Operación Completa");
+                                return;
+                            }
+                        }
+                    }
+                    // Verificar Stop Loss de TP3
+                    else if (precioActual <= operacionActualTPFEMA.PrecioStopLossTP3)
+                    {
+                        if (operacionActualTPFEMA.OrdenTP3Llena)
+                        {
+                            ExitLong(0, operacionActualTPFEMA.ContratosTP3, "SL_TP3", "EntryTP3");
+                            operacionActualTPFEMA.TP3Ejecutado = true;
+                            
+                            if (LogsTP3TPFEMA)
+                            {
+                                Print($"\n🛑 STOP LOSS TP3 ACTIVADO");
+                                Print($"   Contratos: {operacionActualTPFEMA.ContratosTP3}");
+                                Print($"   Stop Loss: {operacionActualTPFEMA.PrecioStopLossTP3:F2}");
+                                Print($"   Pérdida (ticks): {operacionActualTPFEMA.TicksStopLossTP3}");
+                            }
+                            
+                            // Verificar si toda la operación debe cerrarse
+                            bool tp1Completo = !UsarTP1TPFEMA || operacionActualTPFEMA.TP1Ejecutado;
+                            bool tp2Completo = !UsarTP2TPFEMA || operacionActualTPFEMA.TP2Ejecutado;
+                            
+                            if (tp1Completo && tp2Completo)
+                            {
+                                FinalizarOperacionTPFEMA("Stop Loss TP3 - Operación Completa");
+                                return;
+                            }
+                        }
+                    }
+                }
+                
+                // ========== VERIFICACIÓN PARA TP1 y TP2 (ORIGINAL) ==========
+                // Verificar TP2
+                if (UsarTP2TPFEMA && operacionActualTPFEMA.ContratosTP2 > 0 && precioActual >= operacionActualTPFEMA.PrecioTP2)
+                {
+                    if (!UsarTP1TPFEMA || operacionActualTPFEMA.TP1Ejecutado)
+                    {
+                        if (operacionActualTPFEMA.OrdenTP2Llena)
+                        {
+                            ExitLong(0, operacionActualTPFEMA.ContratosTP2, "TP2", "EntryTP2");
+                            operacionActualTPFEMA.EstadoOp = 2;
+                            operacionActualTPFEMA.TP2Ejecutado = true;
+                            
+                            // Si todo está cerrado, finalizar
+                            if ((!UsarTP1TPFEMA || operacionActualTPFEMA.TP1Ejecutado) && 
+                                (!UsarTP3TPFEMA || operacionActualTPFEMA.TP3Ejecutado))
+                            {
+                                FinalizarOperacionTPFEMA("TP2 Alcanzado");
+                            }
+                        }
+                    }
+                    return;
+                }
+                
+                // Verificar Stop Loss
+                if (precioActual <= operacionActualTPFEMA.PrecioStopLoss)
+                {
+                    ExitLong();
+                    operacionActualTPFEMA.EstadoOp = 3;
+                    FinalizarOperacionTPFEMA("Stop Loss");
+                    return;
+                }
+                
+                // Verificar TP1
+                if (UsarTP1TPFEMA && operacionActualTPFEMA.ContratosTP1 > 0 && 
+                    !operacionActualTPFEMA.TP1Ejecutado && precioActual >= operacionActualTPFEMA.PrecioTP1)
+                {
+                    if (operacionActualTPFEMA.OrdenTP1Llena)
+                    {
+                        ExitLong(0, operacionActualTPFEMA.ContratosTP1, "TP1", "EntryTP1");
+                        operacionActualTPFEMA.TP1Ejecutado = true;
+                        operacionActualTPFEMA.EstadoOp = 1;
+                        
+                        if (!UsarTP2TPFEMA || operacionActualTPFEMA.ContratosTP2 == 0)
+                        {
+                            if (LogsOperacionesTPFEMA)
+                                Print($"✓ TP1 ejecutado - TP2 no activo");
+                            
+                            if (!UsarTP3TPFEMA || operacionActualTPFEMA.TP3Ejecutado)
+                            {
+                                FinalizarOperacionTPFEMA("TP1 Alcanzado");
+                            }
+                            return;
+                        }
+                        
+                        if (UsarTP2TPFEMA && ActivarTrailingStopTPFEMA && operacionActualTPFEMA.OrdenTP2Llena)
+                        {
+                            operacionActualTPFEMA.TrailingActivo = true;
+                            operacionActualTPFEMA.UltimoStopTrailing = operacionActualTPFEMA.PrecioStopLoss;
+                            if (LogsOperacionesTPFEMA)
+                                Print($"✓ TP1 ejecutado - Trailing Stop ACTIVADO desde Stop Loss: {operacionActualTPFEMA.PrecioStopLoss:F2}");
+                        }
+                    }
+                    return;
+                }
+                
+                // Verificar Trailing Stop
+                if (operacionActualTPFEMA.TrailingActivo)
+                {
+                    GestionarTrailingStopTPFEMA();
+                    
+                    if (precioActual <= operacionActualTPFEMA.UltimoStopTrailing)
+                    {
+                        ExitLong(0, operacionActualTPFEMA.ContratosTP2, "TrailingStop", "EntryTP2");
+                        operacionActualTPFEMA.TP2Ejecutado = true;
+                        
+                        if (!UsarTP3TPFEMA || operacionActualTPFEMA.TP3Ejecutado)
+                        {
+                            FinalizarOperacionTPFEMA("Trailing Stop");
+                        }
+                        return;
+                    }
+                }
+            }
+            else
+            {
+                // ========== VERIFICACIÓN PARA TP3 SHORT (INDEPENDIENTE) ==========
+                if (UsarTP3TPFEMA && operacionActualTPFEMA.ContratosTP3 > 0 && !operacionActualTPFEMA.TP3Ejecutado)
+                {
+                    // Verificar TP3
+                    if (precioActual <= operacionActualTPFEMA.PrecioTP3)
+                    {
+                        if (operacionActualTPFEMA.OrdenTP3Llena)
+                        {
+                            ExitShort(0, operacionActualTPFEMA.ContratosTP3, "TP3", "EntryTP3");
+                            operacionActualTPFEMA.TP3Ejecutado = true;
+                            
+                            if (LogsTP3TPFEMA)
+                            {
+                                Print($"\n🎯 TP3 ALCANZADO");
+                                Print($"   Contratos: {operacionActualTPFEMA.ContratosTP3}");
+                                Print($"   Precio: {operacionActualTPFEMA.PrecioTP3:F2}");
+                            }
+                            
+                            // Verificar si toda la operación debe cerrarse
+                            bool tp1Completo = !UsarTP1TPFEMA || operacionActualTPFEMA.TP1Ejecutado;
+                            bool tp2Completo = !UsarTP2TPFEMA || operacionActualTPFEMA.TP2Ejecutado;
+                            
+                            if (tp1Completo && tp2Completo)
+                            {
+                                FinalizarOperacionTPFEMA("TP3 Alcanzado - Operación Completa");
+                                return;
+                            }
+                        }
+                    }
+                    // Verificar Stop Loss de TP3
+                    else if (precioActual >= operacionActualTPFEMA.PrecioStopLossTP3)
+                    {
+                        if (operacionActualTPFEMA.OrdenTP3Llena)
+                        {
+                            ExitShort(0, operacionActualTPFEMA.ContratosTP3, "SL_TP3", "EntryTP3");
+                            operacionActualTPFEMA.TP3Ejecutado = true;
+                            
+                            if (LogsTP3TPFEMA)
+                            {
+                                Print($"\n🛑 STOP LOSS TP3 ACTIVADO");
+                                Print($"   Contratos: {operacionActualTPFEMA.ContratosTP3}");
+                                Print($"   Stop Loss: {operacionActualTPFEMA.PrecioStopLossTP3:F2}");
+                                Print($"   Pérdida (ticks): {operacionActualTPFEMA.TicksStopLossTP3}");
+                            }
+                            
+                            // Verificar si toda la operación debe cerrarse
+                            bool tp1Completo = !UsarTP1TPFEMA || operacionActualTPFEMA.TP1Ejecutado;
+                            bool tp2Completo = !UsarTP2TPFEMA || operacionActualTPFEMA.TP2Ejecutado;
+                            
+                            if (tp1Completo && tp2Completo)
+                            {
+                                FinalizarOperacionTPFEMA("Stop Loss TP3 - Operación Completa");
+                                return;
+                            }
+                        }
+                    }
+                }
+                
+                // ========== VERIFICACIÓN PARA TP1 y TP2 SHORT (ORIGINAL) ==========
+                // Verificar TP2
+                if (UsarTP2TPFEMA && operacionActualTPFEMA.ContratosTP2 > 0 && precioActual <= operacionActualTPFEMA.PrecioTP2)
+                {
+                    if (!UsarTP1TPFEMA || operacionActualTPFEMA.TP1Ejecutado)
+                    {
+                        if (operacionActualTPFEMA.OrdenTP2Llena)
+                        {
+                            ExitShort(0, operacionActualTPFEMA.ContratosTP2, "TP2", "EntryTP2");
+                            operacionActualTPFEMA.EstadoOp = 2;
+                            operacionActualTPFEMA.TP2Ejecutado = true;
+                            
+                            if ((!UsarTP1TPFEMA || operacionActualTPFEMA.TP1Ejecutado) && 
+                                (!UsarTP3TPFEMA || operacionActualTPFEMA.TP3Ejecutado))
+                            {
+                                FinalizarOperacionTPFEMA("TP2 Alcanzado");
+                            }
+                        }
+                    }
+                    return;
+                }
+                
+                // Verificar Stop Loss
+                if (precioActual >= operacionActualTPFEMA.PrecioStopLoss)
+                {
+                    ExitShort();
+                    operacionActualTPFEMA.EstadoOp = 3;
+                    FinalizarOperacionTPFEMA("Stop Loss");
+                    return;
+                }
+                
+                // Verificar TP1
+                if (UsarTP1TPFEMA && operacionActualTPFEMA.ContratosTP1 > 0 && 
+                    !operacionActualTPFEMA.TP1Ejecutado && precioActual <= operacionActualTPFEMA.PrecioTP1)
+                {
+                    if (operacionActualTPFEMA.OrdenTP1Llena)
+                    {
+                        ExitShort(0, operacionActualTPFEMA.ContratosTP1, "TP1", "EntryTP1");
+                        operacionActualTPFEMA.TP1Ejecutado = true;
+                        operacionActualTPFEMA.EstadoOp = 1;
+                        
+                        if (!UsarTP2TPFEMA || operacionActualTPFEMA.ContratosTP2 == 0)
+                        {
+                            if (LogsOperacionesTPFEMA)
+                                Print($"✓ TP1 ejecutado - TP2 no activo");
+                            
+                            if (!UsarTP3TPFEMA || operacionActualTPFEMA.TP3Ejecutado)
+                            {
+                                FinalizarOperacionTPFEMA("TP1 Alcanzado");
+                            }
+                            return;
+                        }
+                        
+                        if (UsarTP2TPFEMA && ActivarTrailingStopTPFEMA && operacionActualTPFEMA.OrdenTP2Llena)
+                        {
+                            operacionActualTPFEMA.TrailingActivo = true;
+                            operacionActualTPFEMA.UltimoStopTrailing = operacionActualTPFEMA.PrecioStopLoss;
+                            if (LogsOperacionesTPFEMA)
+                                Print($"✓ TP1 ejecutado - Trailing Stop ACTIVADO desde Stop Loss: {operacionActualTPFEMA.PrecioStopLoss:F2}");
+                        }
+                    }
+                    return;
+                }
+                
+                // Verificar Trailing Stop
+                if (operacionActualTPFEMA.TrailingActivo)
+                {
+                    GestionarTrailingStopTPFEMA();
+                    
+                    if (precioActual >= operacionActualTPFEMA.UltimoStopTrailing)
+                    {
+                        ExitShort(0, operacionActualTPFEMA.ContratosTP2, "TrailingStop", "EntryTP2");
+                        operacionActualTPFEMA.TP2Ejecutado = true;
+                        
+                        if (!UsarTP3TPFEMA || operacionActualTPFEMA.TP3Ejecutado)
+                        {
+                            FinalizarOperacionTPFEMA("Trailing Stop");
+                        }
+                        return;
+                    }
+                }
+            }
+        }
+
+        private void GestionarTrailingStopTPFEMA()
+        {
+            if (!operacionActualTPFEMA.TP1Ejecutado || !operacionActualTPFEMA.TrailingActivo) return;
+            
+            double precioActual = Close[0];
+            double distanciaMovimiento = TrailingMovimientoTicksTPFEMA * TickSize;
+            
+            if (operacionActualTPFEMA.EsAlcista)
+            {
+                double stopOptimo = precioActual - distanciaMovimiento;
+                
+                if (stopOptimo > operacionActualTPFEMA.UltimoStopTrailing)
+                {
+                    double avance = stopOptimo - operacionActualTPFEMA.UltimoStopTrailing;
+                    double minimoAvance = TrailingActivacionTicksTPFEMA * TickSize;
+                    
+                    if (avance >= minimoAvance)
+                    {
+                        if (LogsOperacionesTPFEMA)
+                        {
+                            double mejoraTicks = avance / TickSize;
+                            Print($"🔼 Trailing ajustado: {operacionActualTPFEMA.UltimoStopTrailing:F2} → {stopOptimo:F2} (+{mejoraTicks:F0} ticks protegidos)");
+                        }
+                        operacionActualTPFEMA.UltimoStopTrailing = stopOptimo;
+                    }
+                }
+            }
+            else
+            {
+                double stopOptimo = precioActual + distanciaMovimiento;
+                
+                if (stopOptimo < operacionActualTPFEMA.UltimoStopTrailing)
+                {
+                    double avance = operacionActualTPFEMA.UltimoStopTrailing - stopOptimo;
+                    double minimoAvance = TrailingActivacionTicksTPFEMA * TickSize;
+                    
+                    if (avance >= minimoAvance)
+                    {
+                        if (LogsOperacionesTPFEMA)
+                        {
+                            double mejoraTicks = avance / TickSize;
+                            Print($"🔽 Trailing ajustado: {operacionActualTPFEMA.UltimoStopTrailing:F2} → {stopOptimo:F2} (+{mejoraTicks:F0} ticks protegidos)");
+                        }
+                        operacionActualTPFEMA.UltimoStopTrailing = stopOptimo;
+                    }
+                }
+            }
+        }
+
+        private void FinalizarOperacionTPFEMA(string motivo)
+        {
+            if (operacionActualTPFEMA == null) return;
+            
+            operacionActualTPFEMA.EstadoOp = 4;
+            
+            if (LogsOperacionesTPFEMA)
+            {
+                LogCierreOperacionTPFEMA(operacionActualTPFEMA, motivo);
+            }
+            
+            operacionEnCursoTPFEMA = false;
+            operacionActualTPFEMA = null;
+        }
+        #endregion
+
+        #region Visualización
+        private void DibujarBloqueTPFEMA(BloqueTPFEMA bloque)
+        {
+            string tag = "BloqueTPFEMA_" + bloque.Inicio.ToString("yyyyMMddHHmmss");
+            bloque.TagRectangulo = tag;
+            
+            Brush colorBorde = bloque.EsAlcista ? Brushes.DodgerBlue : Brushes.Crimson;
+            Brush colorRelleno = bloque.EsAlcista ? Brushes.LightBlue : Brushes.LightCoral;
+            
+            Brush relleno = colorRelleno.Clone();
+            relleno.Opacity = 0.15;
+            
+            Draw.Rectangle(this, tag, false,
+                bloque.Inicio, bloque.Low,
+                bloque.Fin, bloque.High,
+                colorBorde, relleno, 1);
+        }
+
+        private void DibujarZonaPremiumTPFEMA(ZonaTPFEMA zona, DateTime fechaInicio)
+        {
+            string tagLinea = zona.TagVisualizacion;
+            
+            Brush colorLinea = zona.EsAlcista ? Brushes.LimeGreen : Brushes.OrangeRed;
+            
+            double lineaCentral = (zona.LimiteInferior + zona.LimiteSuperior) / 2.0;
+            
+            Draw.Line(this, tagLinea, false,
+                fechaInicio, lineaCentral,
+                zona.FechaExpiracion, lineaCentral,
+                colorLinea, DashStyleHelper.Solid, 2);
+            
+            string tagZona = tagLinea + "_Rect";
+            Brush rellenoZona = colorLinea.Clone();
+            rellenoZona.Opacity = 0.25;
+            
+            Draw.Rectangle(this, tagZona, false,
+                fechaInicio, zona.LimiteInferior,
+                zona.FechaExpiracion, zona.LimiteSuperior,
+                colorLinea, rellenoZona, 1);
+        }
+
+        private void DibujarSenalOperacionTPFEMA(SenalOperacionTPFEMA senal)
+        {
+            string tag = "SenalTPFEMA_" + senal.Id + "_" + senal.Fecha.ToString("yyyyMMddHHmmss");
+            senal.TagFlecha = tag;
+            
+            if (senal.EsAlcista)
+            {
+                Draw.ArrowUp(this, tag, false, 0, senal.PrecioSenal, Brushes.LimeGreen);
+            }
+            else
+            {
+                Draw.ArrowDown(this, tag, false, 0, senal.PrecioSenal, Brushes.Red);
+            }
+        }
+
+        private void LimpiarAntiguosTPFEMA()
+        {
+            while (historialBloquesTPFEMA.Count > MaximoBloquesTPFEMA)
+            {
+                var bloqueViejo = historialBloquesTPFEMA[0];
+                if (!string.IsNullOrEmpty(bloqueViejo.TagRectangulo))
+                    RemoveDrawObject(bloqueViejo.TagRectangulo);
+                historialBloquesTPFEMA.RemoveAt(0);
+            }
+        }
+        #endregion
+
+        #region Sistema de Logs
+        private void LogEncabezadoTPFEMA()
+        {
+            Print("\n╔═══════════════════════════════════════════════════════════════╗");
+            Print("║   ESTRATEGIA VELA GUIA TP FIJO + EMA + TP3 INDEPENDIENTE     ║");
+            Print("╠═══════════════════════════════════════════════════════════════╣");
+            Print($"║ Sistema: Zonas Premium Dinámicas");
+            Print($"║ Umbral: {UmbralZonaPctTPFEMA}% del rango");
+            Print($"║ Duración máxima: {DuracionMaximaZonaMinutosTPFEMA} minutos");
+            Print($"║ ═══════════════════════════════════════════════════════════");
+            Print($"║ FILTRO EMA: {(ActivarFiltroEMATPFEMA ? "ACTIVADO" : "DESACTIVADO")}");
+            if (ActivarFiltroEMATPFEMA)
+            {
+                Print($"║ Periodo EMA: {PeriodoEMATPFEMA}");
+                Print($"║ Tolerancia: {ToleranciaEMATicksTPFEMA} ticks");
+            }
+            Print($"║ ═══════════════════════════════════════════════════════════");
+            Print($"║ TRADING: {(ActivarTradingTPFEMA ? "ACTIVADO" : "DESACTIVADO")}");
+            Print($"║ TP1: {(UsarTP1TPFEMA ? $"ACTIVADO ({TakeProfit1TicksTPFEMA} ticks)" : "DESACTIVADO")}");
+            Print($"║ TP2: {(UsarTP2TPFEMA ? $"ACTIVADO (1:{RelacionRiesgoTP2TPFEMA})" : "DESACTIVADO")}");
+            Print($"║ ───────────────────────────────────────────────────────────");
+            Print($"║ TP3: {(UsarTP3TPFEMA ? "ACTIVADO (INDEPENDIENTE)" : "DESACTIVADO")}");
+            if (UsarTP3TPFEMA)
+            {
+                Print($"║ TP3 - Riesgo: ${RiesgoTP3TPFEMA:F2}");
+                Print($"║ TP3 - Valor Tick: ${ValorTickTP3TPFEMA:F2}");
+                Print($"║ TP3 - SL Tipo: {(TipoStopLossTP3TPFEMA == 0 ? "Vela" : "Zona")} + {TicksDeslizamientoTP3TPFEMA} ticks");
+                Print($"║ TP3 - Relación R:B = {RelacionRiesgoTP3TPFEMA}:{RelacionBeneficioTP3TPFEMA}");
+            }
+            Print("╚═══════════════════════════════════════════════════════════════╝\n");
+        }
+
+        private void LogInicioBloqueTPFEMA(BloqueTPFEMA bloque)
+        {
+            if (!LogsDetalladosTPFEMA) return;
+            
+            Print($"\n╔══════════════════════════════════════════════════════════════");
+            Print($"║ INICIO BLOQUE #{bloque.NumeroBloque}");
+            Print($"╠══════════════════════════════════════════════════════════════");
+            Print($"║ Tiempo: {bloque.Inicio:yyyy-MM-dd HH:mm:ss}");
+            Print($"║ Fin: {bloque.Fin:yyyy-MM-dd HH:mm:ss}");
+            Print($"╚══════════════════════════════════════════════════════════════");
+        }
+
+        private void LogFinalizacionBloqueTPFEMA(BloqueTPFEMA bloque)
+        {
+            if (!LogsDetalladosTPFEMA) return;
+            
+            string tendencia = bloque.EsAlcista ? "Alcista" : "Bajista";
+            
+            Print($"\n╔══════════════════════════════════════════════════════════════");
+            Print($"║ FINALIZACIÓN BLOQUE #{bloque.NumeroBloque}");
+            Print($"╠══════════════════════════════════════════════════════════════");
+            Print($"║ HIGH: {bloque.High:F2} ({bloque.TiempoHigh:HH:mm:ss})");
+            Print($"║ LOW: {bloque.Low:F2} ({bloque.TiempoLow:HH:mm:ss})");
+            Print($"║ Tendencia: {tendencia}");
+            Print($"╚══════════════════════════════════════════════════════════════");
+        }
+
+        private void LogCreacionZonaTPFEMA(ZonaTPFEMA zona, BloqueTPFEMA bloqueActual, BloqueTPFEMA bloqueAnterior)
+        {
+            string tendencia = zona.EsAlcista ? "Alcista" : "Bajista";
+            
+            Print($"\n╔══════════════════════════════════════════════════════════════");
+            Print($"║ 🆕 NUEVA ZONA #{zona.Id} - {tendencia}");
+            Print($"╠══════════════════════════════════════════════════════════════");
+            Print($"║ Bloque: #{bloqueActual.NumeroBloque}");
+            Print($"║ Creada: {zona.FechaCreacion:HH:mm:ss}");
+            Print($"║ Expira: {zona.FechaExpiracion:HH:mm:ss} ({DuracionMaximaZonaMinutosTPFEMA} min)");
+            
+            if (bloqueAnterior != null)
+            {
+                Print($"║ Bloques usados: #{bloqueAnterior.NumeroBloque}, #{bloqueActual.NumeroBloque}");
+                
+                if (zona.EsAlcista)
+                {
+                    Print($"║ LOW más bajo: {zona.PuntoExtremo:F2}");
+                    Print($"║ HIGH actual: {zona.PuntoActual:F2}");
+                }
+                else
+                {
+                    Print($"║ HIGH más alto: {zona.PuntoExtremo:F2}");
+                    Print($"║ LOW actual: {zona.PuntoActual:F2}");
+                }
+            }
+            
+            Print($"║ Zona: [{zona.LimiteInferior:F2} - {zona.LimiteSuperior:F2}]");
+            Print($"║ Total zonas activas: {zonasActivasTPFEMA.Count(z => z.EstadoZ == 0 || z.EstadoZ == 1)}");
+            Print($"╚══════════════════════════════════════════════════════════════");
+        }
+
+        private void LogRecalculoZonaTPFEMA(ZonaTPFEMA zona, BloqueTPFEMA bloqueNuevo, 
+            double limInfAnt, double limSupAnt, double puntoExtremoAnt, double puntoActualAnt)
+        {
+            string tendencia = zona.EsAlcista ? "Alcista" : "Bajista";
+            string nombreExtremo = zona.EsAlcista ? "LOW" : "HIGH";
+            string nombreActual = zona.EsAlcista ? "HIGH" : "LOW";
+            
+            Print($"\n╔══════════════════════════════════════════════════════════════");
+            Print($"║ 🔄 RECÁLCULO ZONA #{zona.Id} - {tendencia}");
+            Print($"╠══════════════════════════════════════════════════════════════");
+            Print($"║ Bloque nuevo: #{bloqueNuevo.NumeroBloque}");
+            Print($"║ Recálculos totales: {zona.NumeroRecalculos}");
+            Print($"║ Nueva expiración: {zona.FechaExpiracion:HH:mm:ss}");
+            Print($"║ ───────────────────────────────────────────────────────────");
+            Print($"║ {nombreExtremo} FIJO: {zona.PuntoExtremo:F2} (NO CAMBIA)");
+            Print($"║ {nombreActual} ANTERIOR: {puntoActualAnt:F2} → NUEVO: {zona.PuntoActual:F2}");
+            Print($"║ ───────────────────────────────────────────────────────────");
+            Print($"║ ZONA ANTERIOR: [{limInfAnt:F2} - {limSupAnt:F2}]");
+            Print($"║ ZONA NUEVA:    [{zona.LimiteInferior:F2} - {zona.LimiteSuperior:F2}]");
+            Print($"╚══════════════════════════════════════════════════════════════");
+        }
+        
+        private void LogSenalDetectadaTPFEMA(SenalOperacionTPFEMA senal, ZonaTPFEMA zona)
+        {
+            string direccion = senal.EsAlcista ? "LONG" : "SHORT";
+            
+            Print($"\n╔══════════════════════════════════════════════════════════════");
+            Print($"║ {direccion} SEÑAL #{senal.Id} - ZONA DINÁMICA #{zona.Id}");
+            Print($"╠══════════════════════════════════════════════════════════════");
+            Print($"║ Fecha: {senal.Fecha:yyyy-MM-dd HH:mm:ss}");
+            Print($"║ Precio: {senal.PrecioSenal:F2}");
+            Print($"║ Zona recalculada {zona.NumeroRecalculos} veces");
+            Print($"╚══════════════════════════════════════════════════════════════");
+        }
+
+        private void LogAperturaOperacionTPFEMA(OperacionActivaTPFEMA op, ZonaTPFEMA zona)
+        {
+            string direccion = op.EsAlcista ? "LONG" : "SHORT";
+            
+            Print($"\n╔══════════════════════════════════════════════════════════════");
+            Print($"║ {direccion} OPERACIÓN #{op.Id} ENVIADA (esperando confirmación)");
+            Print($"╠══════════════════════════════════════════════════════════════");
+            Print($"║ Entrada: {op.PrecioEntrada:F2}");
+            Print($"║ Contratos TP1: {op.ContratosTP1} | TP2: {op.ContratosTP2} | TP3: {op.ContratosTP3}");
+            Print($"║ Stop Loss (TP1/TP2): {op.PrecioStopLoss:F2}");
+            
+            if (op.ContratosTP1 > 0) 
+                Print($"║ TP1: {op.PrecioTP1:F2} ({op.ContratosTP1} contratos)");
+            
+            if (op.ContratosTP2 > 0) 
+                Print($"║ TP2: {op.PrecioTP2:F2} ({op.ContratosTP2} contratos)");
+            
+            if (op.ContratosTP3 > 0)
+            {
+                Print($"║ ───────────────────────────────────────────────────────────");
+                Print($"║ TP3 (INDEPENDIENTE):");
+                Print($"║   Contratos: {op.ContratosTP3}");
+                Print($"║   Stop Loss: {op.PrecioStopLossTP3:F2} ({op.TicksStopLossTP3} ticks)");
+                Print($"║   Take Profit: {op.PrecioTP3:F2}");
+                Print($"║   Relación R:B: {RelacionRiesgoTP3TPFEMA}:{RelacionBeneficioTP3TPFEMA}");
+                Print($"║   Riesgo: ${RiesgoTP3TPFEMA:F2}");
+            }
+            
+            if (op.TrailingActivo) 
+            {
+                Print($"║ ─────────────────────────────────────────────────────────");
+                Print($"║ Trailing: ACTIVO desde Stop Loss ({op.UltimoStopTrailing:F2})");
+                Print($"║ Activación: {TrailingActivacionTicksTPFEMA} ticks | Movimiento: {TrailingMovimientoTicksTPFEMA} ticks");
+            }
+            
+            Print($"╚══════════════════════════════════════════════════════════════");
+        }
+
+        private void LogCierreOperacionTPFEMA(OperacionActivaTPFEMA op, string motivo)
+        {
+            string direccion = op.EsAlcista ? "LONG" : "SHORT";
+            string[] estados = { "Abierta", "TP1Alcanzado", "TP2Alcanzado", "StopLoss", "Cerrada" };
+            
+            Print($"\n╔══════════════════════════════════════════════════════════════");
+            Print($"║ {direccion} OPERACIÓN #{op.Id} CERRADA");
+            Print($"╠══════════════════════════════════════════════════════════════");
+            Print($"║ Motivo: {motivo}");
+            Print($"║ Estado final: {estados[op.EstadoOp]}");
+            
+            if (op.ContratosTP1 > 0 && op.TP1Ejecutado)
+                Print($"║ TP1: {op.ContratosTP1} contratos cerrados @ {op.PrecioTP1:F2}");
+            
+            if (op.ContratosTP2 > 0)
+            {
+                if (op.TP2Ejecutado)
+                {
+                    if (motivo.Contains("TP2"))
+                        Print($"║ TP2: {op.ContratosTP2} contratos cerrados @ {op.PrecioTP2:F2}");
+                    else if (motivo.Contains("Trailing"))
+                        Print($"║ TP2: {op.ContratosTP2} contratos cerrados por Trailing");
+                    else if (motivo.Contains("Stop"))
+                        Print($"║ TP2: {op.ContratosTP2} contratos cerrados por Stop Loss");
+                    else
+                        Print($"║ TP2: {op.ContratosTP2} contratos cerrados");
+                }
+                else if (!op.TP2Ejecutado && motivo.Contains("Stop"))
+                {
+                    Print($"║ TP2: {op.ContratosTP2} contratos cerrados por Stop Loss");
+                }
+            }
+            
+            if (op.ContratosTP3 > 0)
+            {
+                if (op.TP3Ejecutado)
+                {
+                    if (motivo.Contains("TP3"))
+                        Print($"║ TP3: {op.ContratosTP3} contratos cerrados @ {op.PrecioTP3:F2}");
+                    else if (motivo.Contains("Stop Loss TP3"))
+                        Print($"║ TP3: {op.ContratosTP3} contratos cerrados por Stop Loss @ {op.PrecioStopLossTP3:F2}");
+                    else
+                        Print($"║ TP3: {op.ContratosTP3} contratos cerrados");
+                }
+                else if (!op.TP3Ejecutado && motivo.Contains("Stop"))
+                {
+                    Print($"║ TP3: {op.ContratosTP3} contratos cerrados por Stop Loss principal");
+                }
+            }
+            
+            Print($"╚══════════════════════════════════════════════════════════════");
+        }
+        
+        private void LogEstadoGeneralTPFEMA(DateTime tiempo)
+        {
+            if (!LogsDetalladosTPFEMA) return;
+            
+            int zonasActivas = zonasActivasTPFEMA.Count(z => z.EstadoZ == 0 || z.EstadoZ == 1);
+            int zonasExpiradas = zonasActivasTPFEMA.Count(z => z.EstadoZ == 3);
+            int zonasCanceladas = zonasActivasTPFEMA.Count(z => z.EstadoZ == 2);
+            int zonasInvalidadas = zonasActivasTPFEMA.Count(z => z.EstadoZ == 4);
+            
+            Print($"\n╔══════════════════════════════════════════════════════════════");
+            Print($"║ RESUMEN DINÁMICO - {tiempo:HH:mm:ss}");
+            Print($"╠══════════════════════════════════════════════════════════════");
+            Print($"║ Bloques: {contadorBloquesTPFEMA}");
+            Print($"║ Zonas activas: {zonasActivas}");
+            
+            if (zonasExpiradas > 0 || zonasCanceladas > 0 || zonasInvalidadas > 0)
+            {
+                string estadosInactivos = "";
+                if (zonasExpiradas > 0) estadosInactivos += $"Expiradas: {zonasExpiradas}";
+                if (zonasCanceladas > 0) estadosInactivos += (estadosInactivos.Length > 0 ? " | " : "") + $"Canceladas: {zonasCanceladas}";
+                if (zonasInvalidadas > 0) estadosInactivos += (estadosInactivos.Length > 0 ? " | " : "") + $"Invalidadas: {zonasInvalidadas}";
+                Print($"║ Zonas inactivas: {estadosInactivos}");
+            }
+            
+            Print($"║ Señales: {contadorSenalesTPFEMA} | Operaciones: {contadorOperacionesTPFEMA}");
+            
+            if (operacionEnCursoTPFEMA && operacionActualTPFEMA != null)
+            {
+                Print($"║ ═══════════════════════════════════════════════════════════");
+                Print($"║ OPERACIÓN EN CURSO:");
+                string dir = operacionActualTPFEMA.EsAlcista ? "LONG" : "SHORT";
+                string[] estados = { "Abierta", "TP1Alcanzado", "TP2Alcanzado", "StopLoss", "Cerrada" };
+                Print($"║ {dir} #{operacionActualTPFEMA.Id} | Estado: {estados[operacionActualTPFEMA.EstadoOp]}");
+                Print($"║ Entrada: {operacionActualTPFEMA.PrecioEntrada:F2} | Actual: {Close[0]:F2}");
+                
+                string estadoTP1 = operacionActualTPFEMA.TP1Ejecutado ? "✓ Ejecutado" : (operacionActualTPFEMA.OrdenTP1Llena ? "Llena" : "No llena");
+                string estadoTP2 = operacionActualTPFEMA.TP2Ejecutado ? "✓ Ejecutado" : (operacionActualTPFEMA.OrdenTP2Llena ? "Llena" : "No llena");
+                string estadoTP3 = operacionActualTPFEMA.TP3Ejecutado ? "✓ Ejecutado" : (operacionActualTPFEMA.OrdenTP3Llena ? "Llena" : "No llena");
+                
+                Print($"║ TP1: {estadoTP1} | TP2: {estadoTP2} | TP3: {estadoTP3}");
+                
+                // Solo mostrar info de TP3 si NO se ha ejecutado
+                if (operacionActualTPFEMA.ContratosTP3 > 0 && UsarTP3TPFEMA && !operacionActualTPFEMA.TP3Ejecutado)
+                {
+                    double distanciaSLTP3 = operacionActualTPFEMA.EsAlcista 
+                        ? (Close[0] - operacionActualTPFEMA.PrecioStopLossTP3) / TickSize
+                        : (operacionActualTPFEMA.PrecioStopLossTP3 - Close[0]) / TickSize;
+                    
+                    double distanciaTP3 = operacionActualTPFEMA.EsAlcista 
+                        ? (operacionActualTPFEMA.PrecioTP3 - Close[0]) / TickSize
+                        : (Close[0] - operacionActualTPFEMA.PrecioTP3) / TickSize;
+                    
+                    Print($"║ TP3 - SL: {distanciaSLTP3:F1} ticks | TP: {distanciaTP3:F1} ticks");
+                }
+                
+                if (operacionActualTPFEMA.TrailingActivo)
+                {
+                    double margen = operacionActualTPFEMA.EsAlcista 
+                        ? (Close[0] - operacionActualTPFEMA.UltimoStopTrailing) / TickSize
+                        : (operacionActualTPFEMA.UltimoStopTrailing - Close[0]) / TickSize;
+                    
+                    Print($"║ Trailing Stop: {operacionActualTPFEMA.UltimoStopTrailing:F2}");
+                    Print($"║   Margen actual: {margen:F1} ticks");
+                }
+                else
+                {
+                    Print($"║ Stop Loss: {operacionActualTPFEMA.PrecioStopLoss:F2}");
+                }
+            }
+            
+            Print($"╚══════════════════════════════════════════════════════════════");
+        }
+        #endregion
+    }
+}
