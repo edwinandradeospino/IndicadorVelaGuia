@@ -1,0 +1,707 @@
+#region Using declarations
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.ComponentModel.DataAnnotations;
+using System.Windows;
+using System.Windows.Media;
+using System.Xml.Serialization;
+using NinjaTrader.Gui;
+using NinjaTrader.Gui.Chart;
+using NinjaTrader.Core.FloatingPoint;
+using NinjaTrader.NinjaScript.DrawingTools;
+#endregion
+
+namespace NinjaTrader.NinjaScript.Indicators
+{
+	/// <summary>
+	/// Indicador ZigZag que identifica y marca los últimos 6 pivotes como A, B, C, D, E, F
+	/// </summary>
+	public class IndicadorPivotesZigZag : Indicator
+	{
+		private Series<double>		zigZagHighZigZags;
+		private Series<double>		zigZagLowZigZags;
+		private Series<double>		zigZagHighSeries;
+		private Series<double>		zigZagLowSeries;
+
+		private double				currentZigZagHigh;
+		private double				currentZigZagLow;
+		private int					lastSwingIdx;
+		private double				lastSwingPrice;
+		private int 				startIndex;
+		private int					trendDir;
+		
+		// Listas para almacenar los pivotes
+		private List<PivotPoint>	pivotPoints;
+		
+		// Estructura EXTENDIDA para almacenar información completa del pivote
+		public struct PivotPoint
+		{
+			public int BarIndex;
+			public double Price;
+			public bool IsHigh;
+			public char Label;
+			
+			// NUEVOS CAMPOS: Valores OHLC de la vela del pivote
+			public double High;
+			public double Low;
+			public double Open;
+			public double Close;
+			
+			public PivotPoint(int barIndex, double price, bool isHigh, char label, 
+			                  double high, double low, double open, double close)
+			{
+				BarIndex = barIndex;
+				Price = price;
+				IsHigh = isHigh;
+				Label = label;
+				High = high;
+				Low = low;
+				Open = open;
+				Close = close;
+			}
+			
+			// Constructor legacy para compatibilidad
+			public PivotPoint(int barIndex, double price, bool isHigh, char label)
+			{
+				BarIndex = barIndex;
+				Price = price;
+				IsHigh = isHigh;
+				Label = label;
+				High = 0;
+				Low = 0;
+				Open = 0;
+				Close = 0;
+			}
+		}
+
+		protected override void OnStateChange()
+		{
+			if (State == State.SetDefaults)
+			{
+				Description					= "Indicador ZigZag que marca los últimos 6 pivotes como A, B, C, D, E, F";
+				Name						= "IndicadorPivotesZigZag";
+				DeviationType				= DeviationType.Points;
+				DeviationValue				= 0.5;
+				DisplayInDataBox			= false;
+				DrawOnPricePanel			= false;
+				IsSuspendedWhileInactive	= true;
+				IsOverlay					= true;
+				PaintPriceMarkers			= false;
+				UseHighLow					= true;
+				
+				// Propiedades para personalizar las etiquetas
+				LabelFontSize				= 12;
+				LabelColor					= Brushes.White;
+				LabelBackgroundColor		= Brushes.DodgerBlue;
+
+				AddPlot(Brushes.DodgerBlue, "ZigZag");
+
+				DisplayInDataBox			= false;
+				PaintPriceMarkers			= false;
+			}
+			else if (State == State.Configure)
+			{
+				currentZigZagHigh	= 0;
+				currentZigZagLow	= 0;
+				lastSwingIdx		= -1;
+				lastSwingPrice		= 0.0;
+				trendDir			= 0; // 1 = trend up, -1 = trend down, init = 0
+				startIndex 			= int.MinValue;
+				pivotPoints			= new List<PivotPoint>();
+			}
+			else if (State == State.DataLoaded)
+			{
+				zigZagHighZigZags	= new Series<double>(this, MaximumBarsLookBack.Infinite);
+				zigZagLowZigZags	= new Series<double>(this, MaximumBarsLookBack.Infinite);
+				zigZagHighSeries	= new Series<double>(this, MaximumBarsLookBack.Infinite);
+				zigZagLowSeries		= new Series<double>(this, MaximumBarsLookBack.Infinite);
+			}
+		}
+
+		protected override void OnBarUpdate()
+		{
+			if (CurrentBar < 2) // Need at least 3 bars to calculate Low/High
+			{
+				zigZagHighSeries[0]		= 0;
+				zigZagLowSeries[0] 		= 0;
+				return;
+			}
+
+			// Initialization
+			if (lastSwingPrice == 0.0)
+				lastSwingPrice = Input[0];
+
+			ISeries<double> highSeries	= High;
+			ISeries<double> lowSeries	= Low;
+
+			if (!UseHighLow)
+			{
+				highSeries	= Input;
+				lowSeries	= Input;
+			}
+
+			// Calculation always for 1-bar ago !
+			bool isSwingHigh			= highSeries[1].ApproxCompare(highSeries[0]) >= 0
+											&& highSeries[1].ApproxCompare(highSeries[2]) >= 0;
+			bool isSwingLow				= lowSeries[1].ApproxCompare(lowSeries[0]) <= 0
+											&& lowSeries[1].ApproxCompare(lowSeries[2]) <= 0;
+			bool isOverHighDeviation	= (DeviationType == DeviationType.Percent && IsPriceGreater(highSeries[1], lastSwingPrice * (1.0 + DeviationValue / 100.0)))
+											|| (DeviationType == DeviationType.Points && IsPriceGreater(highSeries[1], lastSwingPrice + DeviationValue));
+			bool isOverLowDeviation		= (DeviationType == DeviationType.Percent && IsPriceGreater(lastSwingPrice * (1.0 - DeviationValue / 100.0), lowSeries[1]))
+											|| (DeviationType == DeviationType.Points && IsPriceGreater(lastSwingPrice - DeviationValue, lowSeries[1]));
+
+			double	saveValue	= 0.0;
+			bool	addHigh		= false;
+			bool	addLow		= false;
+			bool	updateHigh	= false;
+			bool	updateLow	= false;
+
+			if (!isSwingHigh && !isSwingLow)
+			{
+				zigZagHighSeries[0] = currentZigZagHigh;
+				zigZagLowSeries[0]	= currentZigZagLow;
+				return;
+			}
+
+			if (trendDir <= 0 && isSwingHigh && isOverHighDeviation)
+			{
+				saveValue	= highSeries[1];
+				addHigh		= true;
+				trendDir	= 1;
+			}
+			else if (trendDir >= 0 && isSwingLow && isOverLowDeviation)
+			{
+				saveValue	= lowSeries[1];
+				addLow		= true;
+				trendDir	= -1;
+			}
+			else if (trendDir == 1 && isSwingHigh && IsPriceGreater(highSeries[1], lastSwingPrice))
+			{
+				saveValue	= highSeries[1];
+				updateHigh	= true;
+			}
+			else if (trendDir == -1 && isSwingLow && IsPriceGreater(lastSwingPrice, lowSeries[1]))
+			{
+				saveValue	= lowSeries[1];
+				updateLow	= true;
+			}
+
+			if (addHigh || addLow || updateHigh || updateLow)
+			{
+				if (updateHigh && lastSwingIdx >= 0)
+				{
+					zigZagHighZigZags.Reset(CurrentBar - lastSwingIdx);
+					Value.Reset(CurrentBar - lastSwingIdx);
+					// Actualizar el último pivote con valores OHLC
+					if (pivotPoints.Count > 0 && pivotPoints[pivotPoints.Count - 1].IsHigh)
+					{
+						UpdateLastPivot(CurrentBar - 1, saveValue, true);
+					}
+				}
+				else if (updateLow && lastSwingIdx >= 0)
+				{
+					zigZagLowZigZags.Reset(CurrentBar - lastSwingIdx);
+					Value.Reset(CurrentBar - lastSwingIdx);
+					// Actualizar el último pivote con valores OHLC
+					if (pivotPoints.Count > 0 && !pivotPoints[pivotPoints.Count - 1].IsHigh)
+					{
+						UpdateLastPivot(CurrentBar - 1, saveValue, false);
+					}
+				}
+
+				if (addHigh || updateHigh)
+				{
+					zigZagHighZigZags[1]	= saveValue;
+					currentZigZagHigh 		= saveValue;
+					zigZagHighSeries[1]		= currentZigZagHigh;
+					Value[1]				= currentZigZagHigh;
+					
+					// Agregar nuevo pivote solo si es add (no update)
+					if (addHigh)
+					{
+						AddPivotPoint(CurrentBar - 1, saveValue, true);
+					}
+				}
+				else
+				{
+					zigZagLowZigZags[1]	= saveValue;
+					currentZigZagLow 	= saveValue;
+					zigZagLowSeries[1]	= currentZigZagLow;
+					Value[1]			= currentZigZagLow;
+					
+					// Agregar nuevo pivote solo si es add (no update)
+					if (addLow)
+					{
+						AddPivotPoint(CurrentBar - 1, saveValue, false);
+					}
+				}
+
+				lastSwingIdx	= CurrentBar - 1;
+				lastSwingPrice	= saveValue;
+			}
+
+			zigZagHighSeries[0]	= currentZigZagHigh;
+			zigZagLowSeries[0]	= currentZigZagLow;
+			
+			if (startIndex == int.MinValue && (zigZagHighZigZags.IsValidDataPoint(1) && Math.Abs(zigZagHighZigZags[1] - zigZagHighZigZags[2]) > double.Epsilon || zigZagLowZigZags.IsValidDataPoint(1) && zigZagLowZigZags[1] != zigZagLowZigZags[2]))
+				startIndex = CurrentBar - (Calculate == Calculate.OnBarClose ? 2 : 1);
+			
+			// Dibujar las etiquetas de los pivotes
+			DrawPivotLabels();
+		}
+		
+		// NUEVO MÉTODO: Actualizar el último pivote con valores OHLC
+		private void UpdateLastPivot(int barIndex, double price, bool isHigh)
+		{
+			if (pivotPoints.Count == 0) return;
+			
+			char currentLabel = pivotPoints[pivotPoints.Count - 1].Label;
+			
+			pivotPoints[pivotPoints.Count - 1] = new PivotPoint(
+				barIndex, 
+				price, 
+				isHigh, 
+				currentLabel,
+				High[CurrentBar - barIndex],
+				Low[CurrentBar - barIndex],
+				Open[CurrentBar - barIndex],
+				Close[CurrentBar - barIndex]
+			);
+		}
+		
+		// MÉTODO MODIFICADO: Agregar pivote con valores OHLC
+		private void AddPivotPoint(int barIndex, double price, bool isHigh)
+		{
+			// Obtener valores OHLC de la barra del pivote
+			int barsAgo = CurrentBar - barIndex;
+			double high = High[barsAgo];
+			double low = Low[barsAgo];
+			double open = Open[barsAgo];
+			double close = Close[barsAgo];
+			
+			// Agregar el nuevo pivote con toda la información OHLC
+			pivotPoints.Add(new PivotPoint(barIndex, price, isHigh, 'A', high, low, open, close));
+			
+			// MODIFICADO: Mantener los últimos 6 pivotes (en lugar de 4)
+			if (pivotPoints.Count > 6)
+			{
+				pivotPoints.RemoveAt(0);
+			}
+			
+			// MODIFICADO: Reasignar las etiquetas A, B, C, D, E, F (desde el más reciente al más antiguo)
+			char[] labels = { 'F', 'E', 'D', 'C', 'B', 'A' };
+			for (int i = 0; i < pivotPoints.Count; i++)
+			{
+				int labelIndex = pivotPoints.Count - 1 - i;
+				var p = pivotPoints[i];
+				pivotPoints[i] = new PivotPoint(p.BarIndex, p.Price, p.IsHigh, labels[labelIndex],
+				                                p.High, p.Low, p.Open, p.Close);
+			}
+		}
+		
+		// MÉTODO MODIFICADO: Dibujar etiquetas para 6 pivotes
+		private void DrawPivotLabels()
+		{
+			// Limpiar etiquetas existentes (ahora 6 en lugar de 4)
+			for (int i = 0; i < 6; i++)
+			{
+				RemoveDrawObject($"PivotLabel_{(char)('A' + i)}");
+			}
+			
+			// Dibujar las etiquetas para los pivotes actuales
+			foreach (var pivot in pivotPoints)
+			{
+				if (pivot.BarIndex >= 0 && pivot.BarIndex < CurrentBar)
+				{
+					int barsAgo = CurrentBar - pivot.BarIndex;
+					
+					Draw.Text(this, $"PivotLabel_{pivot.Label}", true, pivot.Label.ToString(), 
+						barsAgo, pivot.Price, 
+						pivot.IsHigh ? 15 : -15, // Offset vertical
+						LabelColor, 
+						new NinjaTrader.Gui.Tools.SimpleFont("Arial", LabelFontSize), 
+						TextAlignment.Center, 
+						LabelBackgroundColor, 
+						LabelBackgroundColor, 
+						100);
+				}
+			}
+		}
+
+		protected override void OnRender(ChartControl chartControl, ChartScale chartScale)
+		{
+			if (Bars == null || chartControl == null || startIndex == int.MinValue)
+				return;
+
+			IsValidDataPointAt(Bars.Count - 1 - (Calculate == Calculate.OnBarClose ? 1 : 0));
+			int preDiff = 1;
+			for (int i = ChartBars.FromIndex - 1; i >= 0; i--)
+			{
+				if (i - Displacement < startIndex || i - Displacement > Bars.Count - 1 - (Calculate == Calculate.OnBarClose ? 1 : 0))
+					break;
+
+				bool isHigh	= zigZagHighZigZags.IsValidDataPointAt(i - Displacement);
+				bool isLow	= zigZagLowZigZags.IsValidDataPointAt(i - Displacement);
+
+				if (isHigh || isLow)
+					break;
+
+				preDiff++;
+			}
+
+			preDiff -= Displacement < 0 ? Displacement : 0 - Displacement;
+
+			int postDiff = 0;
+			for (int i = ChartBars.ToIndex; i <= zigZagHighZigZags.Count; i++)
+			{
+				if (i - Displacement < startIndex || i - Displacement > Bars.Count - 1 - (Calculate == Calculate.OnBarClose ? 1 : 0))
+					break;
+
+				bool isHigh	= zigZagHighZigZags.IsValidDataPointAt(i - Displacement);
+				bool isLow	= zigZagLowZigZags.IsValidDataPointAt(i - Displacement);
+
+				if (isHigh || isLow)
+					break;
+
+				postDiff++;
+			}
+
+			postDiff += Displacement < 0 ? 0 - Displacement : Displacement;
+
+			int		lastIdx		= -1;
+			double	lastValue	= -1;
+			SharpDX.Direct2D1.PathGeometry	g		= null;
+			SharpDX.Direct2D1.GeometrySink	sink	= null;
+
+			for (int idx = ChartBars.FromIndex - preDiff; idx <= ChartBars.ToIndex + postDiff; idx++)
+			{
+				if (idx < startIndex || idx > Bars.Count - (Calculate == Calculate.OnBarClose ? 2 : 1) || idx < Math.Max(BarsRequiredToPlot - Displacement, Displacement))
+					continue;
+
+				bool isHigh	= zigZagHighZigZags.IsValidDataPointAt(idx);
+				bool isLow	= zigZagLowZigZags.IsValidDataPointAt(idx);
+
+				if (!isHigh && !isLow)
+					continue;
+				
+				double value = isHigh ? zigZagHighZigZags.GetValueAt(idx) : zigZagLowZigZags.GetValueAt(idx);
+				
+				if (lastIdx >= startIndex)
+				{
+					float x1	= chartControl.BarSpacingType == BarSpacingType.TimeBased || chartControl.BarSpacingType == BarSpacingType.EquidistantMulti && idx + Displacement >= ChartBars.Count
+						? chartControl.GetXByTime(ChartBars.GetTimeByBarIdx(chartControl, idx + Displacement))
+						: chartControl.GetXByBarIndex(ChartBars, idx + Displacement);
+					float y1	= chartScale.GetYByValue(value);
+
+					if (sink == null)
+					{
+						float x0	= chartControl.BarSpacingType == BarSpacingType.TimeBased || chartControl.BarSpacingType == BarSpacingType.EquidistantMulti && lastIdx + Displacement >= ChartBars.Count
+							? chartControl.GetXByTime(ChartBars.GetTimeByBarIdx(chartControl, lastIdx + Displacement))
+							: chartControl.GetXByBarIndex(ChartBars, lastIdx + Displacement);
+						float y0	= chartScale.GetYByValue(lastValue);
+						g			= new SharpDX.Direct2D1.PathGeometry(Core.Globals.D2DFactory);
+						sink		= g.Open();
+						sink.BeginFigure(new SharpDX.Vector2(x0, y0), SharpDX.Direct2D1.FigureBegin.Hollow);
+					}
+					sink.AddLine(new SharpDX.Vector2(x1, y1));
+				}
+
+				lastIdx		= idx;
+				lastValue	= value;
+			}
+
+			if (sink != null)
+			{
+				sink.EndFigure(SharpDX.Direct2D1.FigureEnd.Open);
+				sink.Close();
+			}
+
+			if (g != null)
+			{
+				var oldAntiAliasMode = RenderTarget.AntialiasMode;
+				RenderTarget.AntialiasMode = SharpDX.Direct2D1.AntialiasMode.PerPrimitive;
+				RenderTarget.DrawGeometry(g, Plots[0].BrushDX, Plots[0].Width, Plots[0].StrokeStyle);
+				RenderTarget.AntialiasMode = oldAntiAliasMode;
+				g.Dispose();
+				RemoveDrawObject("NinjaScriptInfo");
+			}
+		}
+
+		#region Properties
+		[NinjaScriptProperty]
+		[Display(ResourceType = typeof(Custom.Resource), Name = "DeviationType", GroupName = "NinjaScriptParameters", Order = 0)]
+		public DeviationType DeviationType { get; set; }
+
+		[Range(0, int.MaxValue), NinjaScriptProperty]
+		[Display(ResourceType = typeof(Custom.Resource), Name = "DeviationValue", GroupName = "NinjaScriptParameters", Order = 1)]
+		public double DeviationValue { get; set; }
+
+		[NinjaScriptProperty]
+		[Display(ResourceType = typeof(Custom.Resource), Name = "UseHighLow", GroupName = "NinjaScriptParameters", Order = 2)]
+		public bool UseHighLow { get; set; }
+		
+		[Range(8, 24), NinjaScriptProperty]
+		[Display(Name = "Tamaño Fuente Etiquetas", GroupName = "Configuración Etiquetas", Order = 3)]
+		public int LabelFontSize { get; set; }
+		
+		[XmlIgnore]
+		[Display(Name = "Color Texto Etiquetas", GroupName = "Configuración Etiquetas", Order = 4)]
+		public Brush LabelColor { get; set; }
+		
+		[Browsable(false)]
+		public string LabelColorSerializable
+		{
+			get { return Serialize.BrushToString(LabelColor); }
+			set { LabelColor = Serialize.StringToBrush(value); }
+		}
+		
+		[XmlIgnore]
+		[Display(Name = "Color Fondo Etiquetas", GroupName = "Configuración Etiquetas", Order = 5)]
+		public Brush LabelBackgroundColor { get; set; }
+		
+		[Browsable(false)]
+		public string LabelBackgroundColorSerializable
+		{
+			get { return Serialize.BrushToString(LabelBackgroundColor); }
+			set { LabelBackgroundColor = Serialize.StringToBrush(value); }
+		}
+
+		[Browsable(false)]
+		[XmlIgnore]
+		public Series<double> ZigZagHigh
+		{
+			get
+			{
+				Update();
+				return zigZagHighSeries;
+			}
+		}
+
+		[Browsable(false)]
+		[XmlIgnore]
+		public Series<double> ZigZagLow
+		{
+			get
+			{
+				Update();
+				return zigZagLowSeries;
+			}
+		}
+		
+		// Propiedades para acceder a los pivotes desde estrategias u otros indicadores
+		[Browsable(false)]
+		[XmlIgnore]
+		public List<PivotPoint> Pivotes
+		{
+			get { return pivotPoints; }
+		}
+		#endregion
+
+		#region Miscellaneous
+		private static bool IsPriceGreater(double a, double b) => a.ApproxCompare(b) > 0;
+
+		public override void OnCalculateMinMax()
+		{
+			MinValue = double.MaxValue;
+			MaxValue = double.MinValue;
+			
+			if (BarsArray[0] == null || ChartBars == null || startIndex == int.MinValue)
+				return;
+
+			for (int seriesCount = 0; seriesCount < Values.Length; seriesCount++)
+			{
+				for (int idx = ChartBars.FromIndex - Displacement; idx <= ChartBars.ToIndex + Displacement; idx++)
+				{
+					if (idx < 0 || idx > Bars.Count - 1 - (Calculate == Calculate.OnBarClose ? 1 : 0))
+						continue;
+					
+					if (zigZagHighZigZags.IsValidDataPointAt(idx))
+						MaxValue = Math.Max(MaxValue, zigZagHighZigZags.GetValueAt(idx));
+					
+					if (zigZagLowZigZags.IsValidDataPointAt(idx))
+						MinValue = Math.Min(MinValue, zigZagLowZigZags.GetValueAt(idx));
+				}
+			}
+		}
+
+		protected override Point[] OnGetSelectionPoints(ChartControl chartControl, ChartScale chartScale)
+		{
+			if (!IsSelected || Count == 0 || Plots[0].Brush.IsTransparent() || startIndex == int.MinValue)
+				return Array.Empty<Point>();
+
+			List<Point> points = new();
+
+			int lastIndex	= Calculate == Calculate.OnBarClose ? ChartBars.ToIndex - 1 : ChartBars.ToIndex - 2;
+
+			for (int i = Math.Max(0, ChartBars.FromIndex - Displacement); i <= Math.Max(lastIndex, Math.Min(Bars.Count - (Calculate == Calculate.OnBarClose ? 2 : 1), lastIndex - Displacement)); i++)
+			{
+				int x = chartControl.BarSpacingType == BarSpacingType.TimeBased || chartControl.BarSpacingType == BarSpacingType.EquidistantMulti && i + Displacement >= ChartBars.Count
+					? chartControl.GetXByTime(ChartBars.GetTimeByBarIdx(chartControl, i + Displacement))
+					: chartControl.GetXByBarIndex(ChartBars, i + Displacement);
+
+				if (Value.IsValidDataPointAt(i))
+					points.Add(new Point(x, chartScale.GetYByValue(Value.GetValueAt(i))));
+			}
+			return points.ToArray();
+		}
+
+		// ========== MÉTODOS PÚBLICOS PARA ACCEDER A INFORMACIÓN DE PIVOTES ==========
+		
+		public PivotPoint? GetPivotByLabel(char label)
+		{
+			foreach (var pivot in pivotPoints)
+			{
+				if (pivot.Label == label)
+					return pivot;
+			}
+			return null;
+		}
+		
+		public double GetPivotPrice(char label)
+		{
+			var pivot = GetPivotByLabel(label);
+			return pivot?.Price ?? double.NaN;
+		}
+		
+		public int GetPivotBarIndex(char label)
+		{
+			var pivot = GetPivotByLabel(label);
+			return pivot?.BarIndex ?? -1;
+		}
+		
+		public bool IsPivotHigh(char label)
+		{
+			var pivot = GetPivotByLabel(label);
+			return pivot?.IsHigh ?? false;
+		}
+		
+		// ========== NUEVOS MÉTODOS: Acceder a valores OHLC de cada pivote ==========
+		
+		public double GetPivotHigh(char label)
+		{
+			var pivot = GetPivotByLabel(label);
+			return pivot?.High ?? double.NaN;
+		}
+		
+		public double GetPivotLow(char label)
+		{
+			var pivot = GetPivotByLabel(label);
+			return pivot?.Low ?? double.NaN;
+		}
+		
+		public double GetPivotOpen(char label)
+		{
+			var pivot = GetPivotByLabel(label);
+			return pivot?.Open ?? double.NaN;
+		}
+		
+		public double GetPivotClose(char label)
+		{
+			var pivot = GetPivotByLabel(label);
+			return pivot?.Close ?? double.NaN;
+		}
+		
+		// ========== NUEVOS MÉTODOS: Calcular distancias entre pivotes ==========
+		
+		/// <summary>
+		/// Calcula el número de velas entre dos pivotes
+		/// </summary>
+		public int GetBarsBetweenPivots(char labelStart, char labelEnd)
+		{
+			var pivotStart = GetPivotByLabel(labelStart);
+			var pivotEnd = GetPivotByLabel(labelEnd);
+			
+			if (pivotStart == null || pivotEnd == null)
+				return -1;
+			
+			return Math.Abs(pivotEnd.Value.BarIndex - pivotStart.Value.BarIndex);
+		}
+		
+		/// <summary>
+		/// Calcula la distancia en puntos entre dos pivotes
+		/// </summary>
+		public double GetPointsBetweenPivots(char labelStart, char labelEnd)
+		{
+			var pivotStart = GetPivotByLabel(labelStart);
+			var pivotEnd = GetPivotByLabel(labelEnd);
+			
+			if (pivotStart == null || pivotEnd == null)
+				return double.NaN;
+			
+			return Math.Abs(pivotEnd.Value.Price - pivotStart.Value.Price);
+		}
+		
+		/// <summary>
+		/// Calcula la distancia en ticks entre dos pivotes
+		/// </summary>
+		public double GetTicksBetweenPivots(char labelStart, char labelEnd)
+		{
+			double points = GetPointsBetweenPivots(labelStart, labelEnd);
+			
+			if (double.IsNaN(points))
+				return double.NaN;
+			
+			return points / TickSize;
+		}
+		
+		#endregion
+	}
+}
+
+#region NinjaScript generated code. Neither change nor remove.
+
+namespace NinjaTrader.NinjaScript.Indicators
+{
+	public partial class Indicator : NinjaTrader.Gui.NinjaScript.IndicatorRenderBase
+	{
+		private IndicadorPivotesZigZag[] cacheIndicadorPivotesZigZag;
+		public IndicadorPivotesZigZag IndicadorPivotesZigZag(DeviationType deviationType, double deviationValue, bool useHighLow, int labelFontSize)
+		{
+			return IndicadorPivotesZigZag(Input, deviationType, deviationValue, useHighLow, labelFontSize);
+		}
+
+		public IndicadorPivotesZigZag IndicadorPivotesZigZag(ISeries<double> input, DeviationType deviationType, double deviationValue, bool useHighLow, int labelFontSize)
+		{
+			if (cacheIndicadorPivotesZigZag != null)
+				for (int idx = 0; idx < cacheIndicadorPivotesZigZag.Length; idx++)
+					if (cacheIndicadorPivotesZigZag[idx] != null && cacheIndicadorPivotesZigZag[idx].DeviationType == deviationType && cacheIndicadorPivotesZigZag[idx].DeviationValue == deviationValue && cacheIndicadorPivotesZigZag[idx].UseHighLow == useHighLow && cacheIndicadorPivotesZigZag[idx].LabelFontSize == labelFontSize && cacheIndicadorPivotesZigZag[idx].EqualsInput(input))
+						return cacheIndicadorPivotesZigZag[idx];
+			return CacheIndicator<IndicadorPivotesZigZag>(new IndicadorPivotesZigZag(){ DeviationType = deviationType, DeviationValue = deviationValue, UseHighLow = useHighLow, LabelFontSize = labelFontSize }, input, ref cacheIndicadorPivotesZigZag);
+		}
+	}
+}
+
+namespace NinjaTrader.NinjaScript.MarketAnalyzerColumns
+{
+	public partial class MarketAnalyzerColumn : MarketAnalyzerColumnBase
+	{
+		public Indicators.IndicadorPivotesZigZag IndicadorPivotesZigZag(DeviationType deviationType, double deviationValue, bool useHighLow, int labelFontSize)
+		{
+			return indicator.IndicadorPivotesZigZag(Input, deviationType, deviationValue, useHighLow, labelFontSize);
+		}
+
+		public Indicators.IndicadorPivotesZigZag IndicadorPivotesZigZag(ISeries<double> input , DeviationType deviationType, double deviationValue, bool useHighLow, int labelFontSize)
+		{
+			return indicator.IndicadorPivotesZigZag(input, deviationType, deviationValue, useHighLow, labelFontSize);
+		}
+	}
+}
+
+namespace NinjaTrader.NinjaScript.Strategies
+{
+	public partial class Strategy : NinjaTrader.Gui.NinjaScript.StrategyRenderBase
+	{
+		public Indicators.IndicadorPivotesZigZag IndicadorPivotesZigZag(DeviationType deviationType, double deviationValue, bool useHighLow, int labelFontSize)
+		{
+			return indicator.IndicadorPivotesZigZag(Input, deviationType, deviationValue, useHighLow, labelFontSize);
+		}
+
+		public Indicators.IndicadorPivotesZigZag IndicadorPivotesZigZag(ISeries<double> input , DeviationType deviationType, double deviationValue, bool useHighLow, int labelFontSize)
+		{
+			return indicator.IndicadorPivotesZigZag(input, deviationType, deviationValue, useHighLow, labelFontSize);
+		}
+	}
+}
+
+#endregion
