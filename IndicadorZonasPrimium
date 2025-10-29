@@ -1,0 +1,1165 @@
+#region Using declarations
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.ComponentModel.DataAnnotations;
+using System.Linq;
+using System.Windows;
+using System.Windows.Media;
+using System.Xml.Serialization;
+using NinjaTrader.Gui;
+using NinjaTrader.Gui.Chart;
+using NinjaTrader.Core.FloatingPoint;
+using NinjaTrader.NinjaScript.DrawingTools;
+using NinjaTrader.NinjaScript.Indicators;
+#endregion
+
+namespace NinjaTrader.NinjaScript.Indicators
+{
+    /// <summary>
+    /// Indicador para gestionar Zonas Premium con ZigZag integrado
+    /// Detecta tramos DE y crea/gestiona zonas premium dinámicas con tiempo de vida configurable
+    /// </summary>
+    public class IndicadorZonasPrimium : Indicator
+    {
+        #region Clases de Zona Premium
+        public class ZonaPremium
+        {
+            public int Id { get; set; }
+            public DateTime FechaCreacion { get; set; }
+            public DateTime FechaUltimaActualizacion { get; set; }
+            public DateTime FechaExpiracion { get; set; } // NUEVO: Fecha de expiración
+            public bool EsAlcista { get; set; }
+            public int EstadoZona { get; set; } // 0=Activa, 1=Ajustada, 2=Anulada, 3=Retirada, 4=Expirada
+            
+            public double LimiteInferior { get; set; }
+            public double LimiteSuperior { get; set; }
+            
+            // Puntos de referencia
+            public PivotInfo PuntoD { get; set; }
+            public PivotInfo PuntoE { get; set; }
+            
+            // Información de ajuste
+            public double PuntoRebote { get; set; }
+            public bool FueAjustada { get; set; }
+            
+            public string TagVisualizacion { get; set; }
+            
+            public ZonaPremium()
+            {
+                EstadoZona = 0;
+                FueAjustada = false;
+                PuntoRebote = 0;
+            }
+            
+            public bool PrecioEnZona(double precio)
+            {
+                return precio >= LimiteInferior && precio <= LimiteSuperior;
+            }
+            
+            public bool PrecioSobrepasaExtremo(double precioHigh, double precioLow)
+            {
+                if (EsAlcista)
+                {
+                    // Para zona alcista: se anula si el precio va por debajo del LOW del Punto D
+                    return precioLow < PuntoD.Low;
+                }
+                else
+                {
+                    // Para zona bajista: se anula si el precio va por encima del HIGH del Punto D
+                    return precioHigh > PuntoD.High;
+                }
+            }
+            
+            // NUEVO: Método para verificar si la zona ha expirado
+            public bool HasExpirado(DateTime fechaActual)
+            {
+                return fechaActual >= FechaExpiracion;
+            }
+            
+            // NUEVO: Método para establecer la fecha de expiración
+            public void EstablecerTiempoVida(int horas)
+            {
+                FechaExpiracion = FechaCreacion.AddHours(horas);
+            }
+        }
+        
+        public class PivotInfo
+        {
+            public int BarIndex { get; set; }
+            public double Price { get; set; }
+            public bool IsHigh { get; set; }
+            public double High { get; set; }
+            public double Low { get; set; }
+            public double Open { get; set; }
+            public double Close { get; set; }
+            public char Label { get; set; }
+            
+            public PivotInfo(int barIndex, double price, bool isHigh, double high, double low, double open, double close, char label)
+            {
+                BarIndex = barIndex;
+                Price = price;
+                IsHigh = isHigh;
+                High = high;
+                Low = low;
+                Open = open;
+                Close = close;
+                Label = label;
+            }
+        }
+        #endregion
+        
+        #region Variables ZigZag Integrado
+        private Series<double> zigZagHighZigZags;
+        private Series<double> zigZagLowZigZags;
+        private Series<double> zigZagHighSeries;
+        private Series<double> zigZagLowSeries;
+
+        private double currentZigZagHigh;
+        private double currentZigZagLow;
+        private int lastSwingIdx;
+        private double lastSwingPrice;
+        private int startIndex;
+        private int trendDir;
+        
+        // Lista de pivotes
+        private List<PivotInfo> pivotPoints;
+        #endregion
+        
+        #region Variables Zonas Premium
+        private List<ZonaPremium> zonasActivas;
+        private int contadorZonas;
+        private PivotInfo ultimoPuntoD;
+        private PivotInfo ultimoPuntoE;
+        private bool primeraEjecucion;
+        private int ultimaBarraProcesada;
+        #endregion
+        
+        #region Properties
+        [NinjaScriptProperty]
+        [Display(Name = "Umbral Zona Premium (%)", Order = 1, GroupName = "Configuración Zona")]
+        [Range(1, 100)]
+        public int UmbralZonaPorcentaje { get; set; }
+        
+        // NUEVO: Propiedad para tiempo de vida de zonas
+        [NinjaScriptProperty]
+        [Display(Name = "Tiempo de Vida (Horas)", Order = 2, GroupName = "Configuración Zona")]
+        [Range(1, 48)]
+        public int TiempoVidaHoras { get; set; }
+        
+        // NUEVO: Propiedad para permitir ajuste de zonas
+        [NinjaScriptProperty]
+        [Display(Name = "Permitir Ajuste de Zonas", Order = 3, GroupName = "Configuración Zona")]
+        public bool PermitirAjusteZonas { get; set; }
+        
+        [NinjaScriptProperty]
+        [Display(Name = "Mostrar Zonas Activas", Order = 4, GroupName = "Visualización")]
+        public bool MostrarZonasActivas { get; set; }
+        
+        [NinjaScriptProperty]
+        [Display(Name = "Mostrar Zonas Ajustadas", Order = 5, GroupName = "Visualización")]
+        public bool MostrarZonasAjustadas { get; set; }
+        
+        [NinjaScriptProperty]
+        [Display(Name = "Mostrar Zonas Anuladas", Order = 6, GroupName = "Visualización")]
+        public bool MostrarZonasAnuladas { get; set; }
+        
+        // NUEVO: Propiedad para mostrar zonas expiradas
+        [NinjaScriptProperty]
+        [Display(Name = "Mostrar Zonas Expiradas", Order = 7, GroupName = "Visualización")]
+        public bool MostrarZonasExpiradas { get; set; }
+        
+        [NinjaScriptProperty]
+        [Display(Name = "Retirar Zonas Anuladas", Order = 8, GroupName = "Gestión")]
+        public bool RetirarZonasAnuladas { get; set; }
+        
+        // NUEVO: Propiedad para retirar zonas expiradas
+        [NinjaScriptProperty]
+        [Display(Name = "Retirar Zonas Expiradas", Order = 9, GroupName = "Gestión")]
+        public bool RetirarZonasExpiradas { get; set; }
+        
+        [NinjaScriptProperty]
+        [Display(Name = "Máximo Zonas Visibles", Order = 10, GroupName = "Gestión")]
+        [Range(1, 50)]
+        public int MaximoZonasVisibles { get; set; }
+        
+        [NinjaScriptProperty]
+        [Display(Name = "Logs Detallados", Order = 11, GroupName = "Debug")]
+        public bool LogsDetallados { get; set; }
+        
+        [NinjaScriptProperty]
+        [Display(Name = "Mostrar ZigZag", Order = 12, GroupName = "ZigZag")]
+        public bool MostrarZigZag { get; set; }
+        
+        [NinjaScriptProperty]
+        [Display(Name = "Mostrar Etiquetas Pivotes", Order = 13, GroupName = "ZigZag")]
+        public bool MostrarEtiquetasPivotes { get; set; }
+        
+        // Propiedades de ZigZag
+        [NinjaScriptProperty]
+        [Display(Name = "Tipo Desviación", Order = 14, GroupName = "ZigZag")]
+        public DeviationType TipoDesviacion { get; set; }
+        
+        [NinjaScriptProperty]
+        [Display(Name = "Valor Desviación", Order = 15, GroupName = "ZigZag")]
+        [Range(0.1, 100)]
+        public double ValorDesviacion { get; set; }
+        
+        [NinjaScriptProperty]
+        [Display(Name = "Usar High/Low", Order = 16, GroupName = "ZigZag")]
+        public bool UsarHighLow { get; set; }
+        
+        // Colores
+        [XmlIgnore]
+        [Display(Name = "Color Zona Alcista", Order = 17, GroupName = "Colores")]
+        public Brush ColorZonaAlcista { get; set; }
+        
+        [Browsable(false)]
+        public string ColorZonaAlcistaSerializable
+        {
+            get { return Serialize.BrushToString(ColorZonaAlcista); }
+            set { ColorZonaAlcista = Serialize.StringToBrush(value); }
+        }
+        
+        [XmlIgnore]
+        [Display(Name = "Color Zona Bajista", Order = 18, GroupName = "Colores")]
+        public Brush ColorZonaBajista { get; set; }
+        
+        [Browsable(false)]
+        public string ColorZonaBajistaSerializable
+        {
+            get { return Serialize.BrushToString(ColorZonaBajista); }
+            set { ColorZonaBajista = Serialize.StringToBrush(value); }
+        }
+        
+        [XmlIgnore]
+        [Display(Name = "Color Zona Anulada", Order = 19, GroupName = "Colores")]
+        public Brush ColorZonaAnulada { get; set; }
+        
+        [Browsable(false)]
+        public string ColorZonaAnuladaSerializable
+        {
+            get { return Serialize.BrushToString(ColorZonaAnulada); }
+            set { ColorZonaAnulada = Serialize.StringToBrush(value); }
+        }
+        
+        // NUEVO: Color para zonas expiradas
+        [XmlIgnore]
+        [Display(Name = "Color Zona Expirada", Order = 20, GroupName = "Colores")]
+        public Brush ColorZonaExpirada { get; set; }
+        
+        [Browsable(false)]
+        public string ColorZonaExpiradaSerializable
+        {
+            get { return Serialize.BrushToString(ColorZonaExpirada); }
+            set { ColorZonaExpirada = Serialize.StringToBrush(value); }
+        }
+        
+        [XmlIgnore]
+        [Display(Name = "Color ZigZag", Order = 21, GroupName = "Colores")]
+        public Brush ColorZigZag { get; set; }
+        
+        [Browsable(false)]
+        public string ColorZigZagSerializable
+        {
+            get { return Serialize.BrushToString(ColorZigZag); }
+            set { ColorZigZag = Serialize.StringToBrush(value); }
+        }
+        #endregion
+        
+        protected override void OnStateChange()
+        {
+            if (State == State.SetDefaults)
+            {
+                Description = "Indicador para gestionar Zonas Premium con ZigZag integrado y tiempo de vida configurable";
+                Name = "IndicadorZonasPrimium";
+                
+                // Configuración básica
+                IsOverlay = true;
+                DrawOnPricePanel = true;
+                DisplayInDataBox = false;
+                PaintPriceMarkers = false;
+                IsSuspendedWhileInactive = true;
+                
+                // Valores por defecto
+                UmbralZonaPorcentaje = 30;
+                TiempoVidaHoras = 24; // NUEVO: Valor por defecto 24 horas
+                PermitirAjusteZonas = true; // NUEVO: Valor por defecto permitir ajuste
+                MostrarZonasActivas = true;
+                MostrarZonasAjustadas = true;
+                MostrarZonasAnuladas = false;
+                MostrarZonasExpiradas = false; // NUEVO
+                RetirarZonasAnuladas = true;
+                RetirarZonasExpiradas = true; // NUEVO
+                MaximoZonasVisibles = 10;
+                LogsDetallados = true;
+                MostrarZigZag = true;
+                MostrarEtiquetasPivotes = true;
+                
+                // ZigZag por defecto
+                TipoDesviacion = DeviationType.Points;
+                ValorDesviacion = 1.0;
+                UsarHighLow = true;
+                
+                // Colores por defecto
+                ColorZonaAlcista = Brushes.LimeGreen;
+                ColorZonaBajista = Brushes.OrangeRed;
+                ColorZonaAnulada = Brushes.Gray;
+                ColorZonaExpirada = Brushes.DarkGray; // NUEVO
+                ColorZigZag = Brushes.DodgerBlue;
+                
+                // Agregar plot para ZigZag
+                AddPlot(ColorZigZag, "ZigZag");
+            }
+            else if (State == State.Configure)
+            {
+                // Inicializar variables de ZigZag
+                currentZigZagHigh = 0;
+                currentZigZagLow = 0;
+                lastSwingIdx = -1;
+                lastSwingPrice = 0.0;
+                trendDir = 0;
+                startIndex = int.MinValue;
+                pivotPoints = new List<PivotInfo>();
+                
+                // Inicializar variables de zonas
+                zonasActivas = new List<ZonaPremium>();
+                contadorZonas = 0;
+                primeraEjecucion = true;
+                ultimaBarraProcesada = -1;
+            }
+            else if (State == State.DataLoaded)
+            {
+                // Inicializar series del ZigZag
+                zigZagHighZigZags = new Series<double>(this, MaximumBarsLookBack.Infinite);
+                zigZagLowZigZags = new Series<double>(this, MaximumBarsLookBack.Infinite);
+                zigZagHighSeries = new Series<double>(this, MaximumBarsLookBack.Infinite);
+                zigZagLowSeries = new Series<double>(this, MaximumBarsLookBack.Infinite);
+                
+                if (LogsDetallados)
+                {
+                    Print("══════════════════════════════════════════════════════════");
+                    Print("║          INDICADOR ZONAS PREMIUM INICIADO               ║");
+                    Print("║         CON ZIGZAG INTEGRADO DIRECTAMENTE               ║");
+                    Print("║  ZigZag: " + TipoDesviacion + " = " + ValorDesviacion);
+                    Print("║  Umbral Zona: " + UmbralZonaPorcentaje + "%");
+                    Print("║  Tiempo de Vida: " + TiempoVidaHoras + " horas"); // NUEVO
+                    Print("═══════════════════════════════════════════════════════════");
+                }
+            }
+        }
+        
+        protected override void OnBarUpdate()
+        {
+            if (CurrentBar < 10) return;
+            
+            // Evitar procesar la misma barra múltiples veces
+            if (CurrentBar == ultimaBarraProcesada) return;
+            ultimaBarraProcesada = CurrentBar;
+            
+            try
+            {
+                // PASO 1: Calcular ZigZag integrado
+                CalcularZigZag();
+                
+                // PASO 2: Detectar nuevos tramos DE si hay cambios en pivotes
+                DetectarNuevoTramoDE();
+                
+                // PASO 3: Verificar estado de zonas existentes (incluyendo expiración)
+                VerificarEstadoZonas();
+                
+                // PASO 4: Gestionar zonas
+                GestionarZonas();
+                
+                // PASO 5: Dibujar etiquetas de pivotes si está habilitado
+                if (MostrarEtiquetasPivotes)
+                {
+                    DibujarEtiquetasPivotes();
+                }
+                
+                // Debug logs
+                if (LogsDetallados && CurrentBar % 500 == 0)
+                {
+                    Print("Barra " + CurrentBar + ": " + pivotPoints.Count + " pivotes, " + zonasActivas.Count + " zonas");
+                    if (pivotPoints.Count > 0)
+                    {
+                        var ultimo = pivotPoints[pivotPoints.Count - 1];
+                        Print("   Ultimo pivote: " + ultimo.Label + " @ " + ultimo.Price.ToString("F2") + " (Barra " + ultimo.BarIndex + ")");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                if (LogsDetallados)
+                {
+                    Print("Error en OnBarUpdate: " + ex.Message);
+                }
+            }
+        }
+        
+        #region Lógica ZigZag Integrada
+        private void CalcularZigZag()
+        {
+            if (CurrentBar < 2)
+            {
+                zigZagHighSeries[0] = 0;
+                zigZagLowSeries[0] = 0;
+                return;
+            }
+
+            // Inicialización
+            if (lastSwingPrice == 0.0)
+                lastSwingPrice = Input[0];
+
+            ISeries<double> highSeries = High;
+            ISeries<double> lowSeries = Low;
+
+            if (!UsarHighLow)
+            {
+                highSeries = Input;
+                lowSeries = Input;
+            }
+
+            // Cálculo para barra anterior
+            bool isSwingHigh = highSeries[1].ApproxCompare(highSeries[0]) >= 0
+                            && highSeries[1].ApproxCompare(highSeries[2]) >= 0;
+            bool isSwingLow = lowSeries[1].ApproxCompare(lowSeries[0]) <= 0
+                           && lowSeries[1].ApproxCompare(lowSeries[2]) <= 0;
+            bool isOverHighDeviation = (TipoDesviacion == DeviationType.Percent && IsPriceGreater(highSeries[1], lastSwingPrice * (1.0 + ValorDesviacion / 100.0)))
+                                     || (TipoDesviacion == DeviationType.Points && IsPriceGreater(highSeries[1], lastSwingPrice + ValorDesviacion));
+            bool isOverLowDeviation = (TipoDesviacion == DeviationType.Percent && IsPriceGreater(lastSwingPrice * (1.0 - ValorDesviacion / 100.0), lowSeries[1]))
+                                    || (TipoDesviacion == DeviationType.Points && IsPriceGreater(lastSwingPrice - ValorDesviacion, lowSeries[1]));
+
+            double saveValue = 0.0;
+            bool addHigh = false;
+            bool addLow = false;
+            bool updateHigh = false;
+            bool updateLow = false;
+
+            if (!isSwingHigh && !isSwingLow)
+            {
+                zigZagHighSeries[0] = currentZigZagHigh;
+                zigZagLowSeries[0] = currentZigZagLow;
+                return;
+            }
+
+            if (trendDir <= 0 && isSwingHigh && isOverHighDeviation)
+            {
+                saveValue = highSeries[1];
+                addHigh = true;
+                trendDir = 1;
+            }
+            else if (trendDir >= 0 && isSwingLow && isOverLowDeviation)
+            {
+                saveValue = lowSeries[1];
+                addLow = true;
+                trendDir = -1;
+            }
+            else if (trendDir == 1 && isSwingHigh && IsPriceGreater(highSeries[1], lastSwingPrice))
+            {
+                saveValue = highSeries[1];
+                updateHigh = true;
+            }
+            else if (trendDir == -1 && isSwingLow && IsPriceGreater(lastSwingPrice, lowSeries[1]))
+            {
+                saveValue = lowSeries[1];
+                updateLow = true;
+            }
+
+            if (addHigh || addLow || updateHigh || updateLow)
+            {
+                if (updateHigh && lastSwingIdx >= 0)
+                {
+                    zigZagHighZigZags.Reset(CurrentBar - lastSwingIdx);
+                    Values[0].Reset(CurrentBar - lastSwingIdx);
+                    
+                    if (pivotPoints.Count > 0 && pivotPoints[pivotPoints.Count - 1].IsHigh)
+                    {
+                        ActualizarUltimoPivote(CurrentBar - 1, saveValue, true);
+                    }
+                }
+                else if (updateLow && lastSwingIdx >= 0)
+                {
+                    zigZagLowZigZags.Reset(CurrentBar - lastSwingIdx);
+                    Values[0].Reset(CurrentBar - lastSwingIdx);
+                    
+                    if (pivotPoints.Count > 0 && !pivotPoints[pivotPoints.Count - 1].IsHigh)
+                    {
+                        ActualizarUltimoPivote(CurrentBar - 1, saveValue, false);
+                    }
+                }
+
+                if (addHigh || updateHigh)
+                {
+                    zigZagHighZigZags[1] = saveValue;
+                    currentZigZagHigh = saveValue;
+                    zigZagHighSeries[1] = currentZigZagHigh;
+                    Values[0][1] = currentZigZagHigh;
+                    
+                    if (addHigh)
+                    {
+                        AgregarPivote(CurrentBar - 1, saveValue, true);
+                    }
+                }
+                else
+                {
+                    zigZagLowZigZags[1] = saveValue;
+                    currentZigZagLow = saveValue;
+                    zigZagLowSeries[1] = currentZigZagLow;
+                    Values[0][1] = currentZigZagLow;
+                    
+                    if (addLow)
+                    {
+                        AgregarPivote(CurrentBar - 1, saveValue, false);
+                    }
+                }
+
+                lastSwingIdx = CurrentBar - 1;
+                lastSwingPrice = saveValue;
+            }
+
+            zigZagHighSeries[0] = currentZigZagHigh;
+            zigZagLowSeries[0] = currentZigZagLow;
+            
+            if (startIndex == int.MinValue && (zigZagHighZigZags.IsValidDataPoint(1) && Math.Abs(zigZagHighZigZags[1] - zigZagHighZigZags[2]) > double.Epsilon || zigZagLowZigZags.IsValidDataPoint(1) && zigZagLowZigZags[1] != zigZagLowZigZags[2]))
+                startIndex = CurrentBar - (Calculate == Calculate.OnBarClose ? 2 : 1);
+        }
+        
+        private void ActualizarUltimoPivote(int barIndex, double price, bool isHigh)
+        {
+            if (pivotPoints.Count == 0) return;
+            
+            char currentLabel = pivotPoints[pivotPoints.Count - 1].Label;
+            int barsAgo = CurrentBar - barIndex;
+            
+            pivotPoints[pivotPoints.Count - 1] = new PivotInfo(
+                barIndex, 
+                price, 
+                isHigh, 
+                High[barsAgo],
+                Low[barsAgo],
+                Open[barsAgo],
+                Close[barsAgo],
+                currentLabel
+            );
+        }
+        
+        private void AgregarPivote(int barIndex, double price, bool isHigh)
+        {
+            int barsAgo = CurrentBar - barIndex;
+            
+            pivotPoints.Add(new PivotInfo(
+                barIndex, 
+                price, 
+                isHigh, 
+                High[barsAgo],
+                Low[barsAgo],
+                Open[barsAgo],
+                Close[barsAgo],
+                'A'
+            ));
+            
+            // Mantener los últimos 6 pivotes
+            if (pivotPoints.Count > 6)
+            {
+                pivotPoints.RemoveAt(0);
+            }
+            
+            // Reasignar etiquetas A, B, C, D, E, F (más reciente al más antiguo)
+            char[] labels = { 'F', 'E', 'D', 'C', 'B', 'A' };
+            for (int i = 0; i < pivotPoints.Count; i++)
+            {
+                int labelIndex = pivotPoints.Count - 1 - i;
+                var p = pivotPoints[i];
+                pivotPoints[i] = new PivotInfo(p.BarIndex, p.Price, p.IsHigh, p.High, p.Low, p.Open, p.Close, labels[labelIndex]);
+            }
+            
+            if (LogsDetallados)
+            {
+                string tipo = isHigh ? "HIGH" : "LOW";
+                Print("Nuevo pivote " + tipo + " agregado: " + pivotPoints[pivotPoints.Count - 1].Label + " @ " + price.ToString("F2"));
+            }
+        }
+        
+        private void DibujarEtiquetasPivotes()
+        {
+            // Limpiar etiquetas existentes
+            for (int i = 0; i < 6; i++)
+            {
+                RemoveDrawObject("PivotLabel_" + (char)('A' + i));
+            }
+            
+            // Dibujar etiquetas actuales
+            foreach (var pivot in pivotPoints)
+            {
+                if (pivot.BarIndex >= 0 && pivot.BarIndex < CurrentBar)
+                {
+                    int barsAgo = CurrentBar - pivot.BarIndex;
+                    
+                    Draw.Text(this, "PivotLabel_" + pivot.Label, true, pivot.Label.ToString(), 
+                        barsAgo, pivot.Price, 
+                        pivot.IsHigh ? 15 : -15,
+                        Brushes.White, 
+                        new NinjaTrader.Gui.Tools.SimpleFont("Arial", 10), 
+                        TextAlignment.Center, 
+                        Brushes.DodgerBlue, 
+                        Brushes.DodgerBlue, 
+                        100);
+                }
+            }
+        }
+        
+        private static bool IsPriceGreater(double a, double b) => a.ApproxCompare(b) > 0;
+        #endregion
+        
+        #region Detección de Tramos DE
+        private void DetectarNuevoTramoDE()
+        {
+            if (pivotPoints.Count < 6)
+            {
+                if (LogsDetallados && pivotPoints.Count > 0 && CurrentBar % 1000 == 0)
+                {
+                    Print("Esperando mas pivotes: " + pivotPoints.Count + "/6 disponibles");
+                }
+                return;
+            }
+            
+            // Buscar pivotes D y E
+            PivotInfo puntoD = pivotPoints.FirstOrDefault(p => p.Label == 'D');
+            PivotInfo puntoE = pivotPoints.FirstOrDefault(p => p.Label == 'E');
+            
+            if (puntoD == null || puntoE == null)
+            {
+                return;
+            }
+            
+            // Verificar que E es más reciente que D
+            if (puntoE.BarIndex <= puntoD.BarIndex)
+            {
+                return;
+            }
+            
+            // Verificar si ya procesamos este tramo
+            if (ultimoPuntoD != null && ultimoPuntoE != null &&
+                ultimoPuntoD.BarIndex == puntoD.BarIndex && 
+                ultimoPuntoE.BarIndex == puntoE.BarIndex)
+            {
+                return;
+            }
+            
+            if (LogsDetallados)
+            {
+                Print("NUEVO TRAMO DE DETECTADO:");
+                Print("   Punto D: " + puntoD.Price.ToString("F2") + " @ Barra " + puntoD.BarIndex + " (" + (puntoD.IsHigh ? "H" : "L") + ")");
+                Print("   Punto E: " + puntoE.Price.ToString("F2") + " @ Barra " + puntoE.BarIndex + " (" + (puntoE.IsHigh ? "H" : "L") + ")");
+            }
+            
+            // Crear zona premium
+            CrearZonaPremium(puntoD, puntoE);
+            
+            // Actualizar referencias
+            ultimoPuntoD = puntoD;
+            ultimoPuntoE = puntoE;
+        }
+        #endregion
+        
+        #region Creación de Zonas Premium
+        private void CrearZonaPremium(PivotInfo puntoD, PivotInfo puntoE)
+        {
+            contadorZonas++;
+            
+            // Determinar si es zona alcista o bajista
+            bool esAlcista = puntoD.Price < puntoE.Price;
+            
+            var nuevaZona = new ZonaPremium
+            {
+                Id = contadorZonas,
+                FechaCreacion = Time[0],
+                FechaUltimaActualizacion = Time[0],
+                EsAlcista = esAlcista,
+                PuntoD = puntoD,
+                PuntoE = puntoE,
+                TagVisualizacion = "ZonaPremium_" + contadorZonas
+            };
+            
+            // NUEVO: Establecer tiempo de vida
+            nuevaZona.EstablecerTiempoVida(TiempoVidaHoras);
+            
+            // Calcular límites de la zona
+            CalcularLimitesZona(nuevaZona);
+            
+            // Agregar a la lista
+            zonasActivas.Add(nuevaZona);
+            
+            // Dibujar zona
+            if (MostrarZonasActivas)
+            {
+                DibujarZona(nuevaZona);
+            }
+            
+            if (LogsDetallados)
+            {
+                string tipo = esAlcista ? "ALCISTA" : "BAJISTA";
+                Print("ZONA PREMIUM #" + nuevaZona.Id + " - " + tipo + " CREADA");
+                Print("   Punto D: " + puntoD.Price.ToString("F2") + " (Barra " + puntoD.BarIndex + ")");
+                Print("   Punto E: " + puntoE.Price.ToString("F2") + " (Barra " + puntoE.BarIndex + ")");
+                Print("   Rango: [" + nuevaZona.LimiteInferior.ToString("F2") + " - " + nuevaZona.LimiteSuperior.ToString("F2") + "]");
+                Print("   Expira: " + nuevaZona.FechaExpiracion.ToString("yyyy-MM-dd HH:mm")); // NUEVO
+            }
+        }
+        
+        private void CalcularLimitesZona(ZonaPremium zona)
+        {
+            double puntoExtremo, puntoOpuesto;
+            
+            if (zona.EsAlcista)
+            {
+                puntoExtremo = zona.PuntoD.Price;
+                puntoOpuesto = zona.PuntoE.Price;
+                
+                double distancia = puntoOpuesto - puntoExtremo;
+                double umbralDistancia = distancia * (UmbralZonaPorcentaje / 100.0);
+                
+                zona.LimiteInferior = puntoExtremo;
+                zona.LimiteSuperior = puntoExtremo + umbralDistancia;
+            }
+            else
+            {
+                puntoExtremo = zona.PuntoD.Price;
+                puntoOpuesto = zona.PuntoE.Price;
+                
+                double distancia = puntoExtremo - puntoOpuesto;
+                double umbralDistancia = distancia * (UmbralZonaPorcentaje / 100.0);
+                
+                zona.LimiteSuperior = puntoExtremo;
+                zona.LimiteInferior = puntoExtremo - umbralDistancia;
+            }
+        }
+        #endregion
+        
+        #region Verificación y Gestión de Zonas
+        private void VerificarEstadoZonas()
+        {
+            if (zonasActivas.Count == 0) return;
+            
+            double precioHigh = High[0];
+            double precioLow = Low[0];
+            DateTime fechaActual = Time[0];
+            
+            foreach (var zona in zonasActivas.Where(z => z.EstadoZona == 0 || z.EstadoZona == 1).ToList())
+            {
+                // NUEVO: Verificar si la zona ha expirado por tiempo
+                if (zona.HasExpirado(fechaActual))
+                {
+                    ExpirarZona(zona);
+                    continue;
+                }
+                
+                // Verificar anulación por precio sobrepasando extremo
+                if (zona.PrecioSobrepasaExtremo(precioHigh, precioLow))
+                {
+                    AnularZona(zona);
+                    continue;
+                }
+                
+                // Verificar ajuste por entrada en zona (solo si está permitido)
+                if (PermitirAjusteZonas && (zona.PrecioEnZona(precioHigh) || zona.PrecioEnZona(precioLow)))
+                {
+                    AjustarZona(zona, precioHigh, precioLow);
+                }
+            }
+        }
+        
+        // NUEVO: Método para expirar zona por tiempo
+        private void ExpirarZona(ZonaPremium zona)
+        {
+            zona.EstadoZona = 4; // 4 = Expirada
+            zona.FechaUltimaActualizacion = Time[0];
+            
+            if (MostrarZonasExpiradas)
+            {
+                RemoveDrawObject(zona.TagVisualizacion);
+                RemoveDrawObject(zona.TagVisualizacion + "_Rect");
+                DibujarZonaExpirada(zona);
+            }
+            else
+            {
+                RemoveDrawObject(zona.TagVisualizacion);
+                RemoveDrawObject(zona.TagVisualizacion + "_Rect");
+            }
+            
+            if (LogsDetallados)
+            {
+                string tipo = zona.EsAlcista ? "ALCISTA" : "BAJISTA";
+                Print("ZONA #" + zona.Id + " " + tipo + " EXPIRADA - Tiempo de vida agotado (" + TiempoVidaHoras + "h)");
+            }
+        }
+        
+        private void AnularZona(ZonaPremium zona)
+        {
+            zona.EstadoZona = 2;
+            zona.FechaUltimaActualizacion = Time[0];
+            
+            if (MostrarZonasAnuladas)
+            {
+                RemoveDrawObject(zona.TagVisualizacion);
+                RemoveDrawObject(zona.TagVisualizacion + "_Rect");
+                DibujarZonaAnulada(zona);
+            }
+            else
+            {
+                RemoveDrawObject(zona.TagVisualizacion);
+                RemoveDrawObject(zona.TagVisualizacion + "_Rect");
+            }
+            
+            if (LogsDetallados)
+            {
+                string tipo = zona.EsAlcista ? "ALCISTA" : "BAJISTA";
+                Print("ZONA #" + zona.Id + " " + tipo + " ANULADA - Precio sobrepaso extremo D");
+            }
+        }
+        
+        private void AjustarZona(ZonaPremium zona, double precioHigh, double precioLow)
+        {
+            if (zona.FueAjustada) return;
+            
+            double puntoRebote = zona.EsAlcista ? precioLow : precioHigh;
+            
+            zona.PuntoRebote = puntoRebote;
+            zona.FueAjustada = true;
+            zona.EstadoZona = 1;
+            zona.FechaUltimaActualizacion = Time[0];
+            
+            RecalcularLimitesAjustados(zona);
+            
+            if (MostrarZonasAjustadas)
+            {
+                RemoveDrawObject(zona.TagVisualizacion);
+                RemoveDrawObject(zona.TagVisualizacion + "_Rect");
+                DibujarZonaAjustada(zona);
+            }
+            
+            if (LogsDetallados)
+            {
+                string tipo = zona.EsAlcista ? "ALCISTA" : "BAJISTA";
+                Print("ZONA #" + zona.Id + " " + tipo + " AJUSTADA - Rebote en " + puntoRebote.ToString("F2"));
+            }
+        }
+        
+        private void RecalcularLimitesAjustados(ZonaPremium zona)
+        {
+            if (zona.EsAlcista)
+            {
+                double distancia = zona.PuntoRebote - zona.PuntoD.Price;
+                double umbralDistancia = distancia * (UmbralZonaPorcentaje / 100.0);
+                
+                zona.LimiteInferior = zona.PuntoD.Price;
+                zona.LimiteSuperior = zona.PuntoD.Price + umbralDistancia;
+            }
+            else
+            {
+                double distancia = zona.PuntoD.Price - zona.PuntoRebote;
+                double umbralDistancia = distancia * (UmbralZonaPorcentaje / 100.0);
+                
+                zona.LimiteSuperior = zona.PuntoD.Price;
+                zona.LimiteInferior = zona.PuntoD.Price - umbralDistancia;
+            }
+        }
+        
+        private void GestionarZonas()
+        {
+            // NUEVO: Retirar zonas expiradas si está configurado
+            if (RetirarZonasExpiradas)
+            {
+                var zonasExpiradas = zonasActivas.Where(z => z.EstadoZona == 4).ToList();
+                
+                foreach (var zona in zonasExpiradas)
+                {
+                    RemoveDrawObject(zona.TagVisualizacion);
+                    RemoveDrawObject(zona.TagVisualizacion + "_Rect");
+                    zonasActivas.Remove(zona);
+                    
+                    if (LogsDetallados)
+                    {
+                        Print("ZONA EXPIRADA #" + zona.Id + " RETIRADA del grafico");
+                    }
+                }
+            }
+            
+            // Retirar zonas anuladas si está configurado
+            if (RetirarZonasAnuladas)
+            {
+                var zonasParaRetirar = zonasActivas.Where(z => z.EstadoZona == 2).ToList();
+                
+                foreach (var zona in zonasParaRetirar)
+                {
+                    RemoveDrawObject(zona.TagVisualizacion);
+                    RemoveDrawObject(zona.TagVisualizacion + "_Rect");
+                    zonasActivas.Remove(zona);
+                    
+                    if (LogsDetallados)
+                    {
+                        Print("ZONA #" + zona.Id + " RETIRADA del grafico");
+                    }
+                }
+            }
+            
+            // Gestión por límite máximo de zonas
+            while (zonasActivas.Count > MaximoZonasVisibles)
+            {
+                var zonaVieja = zonasActivas.OrderBy(z => z.FechaCreacion).First();
+                RemoveDrawObject(zonaVieja.TagVisualizacion);
+                RemoveDrawObject(zonaVieja.TagVisualizacion + "_Rect");
+                zonasActivas.Remove(zonaVieja);
+                
+                if (LogsDetallados)
+                {
+                    Print("ZONA #" + zonaVieja.Id + " removida por limite maximo");
+                }
+            }
+        }
+        #endregion
+        
+        #region Visualización
+        private void DibujarZona(ZonaPremium zona)
+        {
+            try
+            {
+                Brush colorLinea = zona.EsAlcista ? ColorZonaAlcista : ColorZonaBajista;
+                Brush colorRelleno = colorLinea.Clone();
+                colorRelleno.Opacity = 0.3;
+                
+                double lineaCentral = (zona.LimiteInferior + zona.LimiteSuperior) / 2.0;
+                int barsAgoD = CurrentBar - zona.PuntoD.BarIndex;
+                if (barsAgoD < 0) barsAgoD = 0;
+                
+                Draw.Line(this, zona.TagVisualizacion, false,
+                    barsAgoD, lineaCentral,
+                    0, lineaCentral,
+                    colorLinea, DashStyleHelper.Solid, 2);
+                
+                Draw.Rectangle(this, zona.TagVisualizacion + "_Rect", false,
+                    barsAgoD, zona.LimiteInferior,
+                    0, zona.LimiteSuperior,
+                    colorLinea, colorRelleno, 1);
+            }
+            catch (Exception ex)
+            {
+                if (LogsDetallados)
+                {
+                    Print("Error dibujando zona #" + zona.Id + ": " + ex.Message);
+                }
+            }
+        }
+        
+        private void DibujarZonaAjustada(ZonaPremium zona)
+        {
+            try
+            {
+                Brush colorLinea = zona.EsAlcista ? ColorZonaAlcista : ColorZonaBajista;
+                Brush colorRelleno = colorLinea.Clone();
+                colorRelleno.Opacity = 0.2;
+                
+                double lineaCentral = (zona.LimiteInferior + zona.LimiteSuperior) / 2.0;
+                int barsAgoD = CurrentBar - zona.PuntoD.BarIndex;
+                if (barsAgoD < 0) barsAgoD = 0;
+                
+                Draw.Line(this, zona.TagVisualizacion, false,
+                    barsAgoD, lineaCentral,
+                    0, lineaCentral,
+                    colorLinea, DashStyleHelper.Dash, 2);
+                
+                Draw.Rectangle(this, zona.TagVisualizacion + "_Rect", false,
+                    barsAgoD, zona.LimiteInferior,
+                    0, zona.LimiteSuperior,
+                    colorLinea, colorRelleno, 1);
+            }
+            catch (Exception ex)
+            {
+                if (LogsDetallados)
+                {
+                    Print("Error dibujando zona ajustada #" + zona.Id + ": " + ex.Message);
+                }
+            }
+        }
+        
+        private void DibujarZonaAnulada(ZonaPremium zona)
+        {
+            try
+            {
+                Brush colorAnulada = ColorZonaAnulada;
+                Brush colorRelleno = colorAnulada.Clone();
+                colorRelleno.Opacity = 0.1;
+                
+                double lineaCentral = (zona.LimiteInferior + zona.LimiteSuperior) / 2.0;
+                int barsAgoD = CurrentBar - zona.PuntoD.BarIndex;
+                if (barsAgoD < 0) barsAgoD = 0;
+                
+                Draw.Line(this, zona.TagVisualizacion, false,
+                    barsAgoD, lineaCentral,
+                    0, lineaCentral,
+                    colorAnulada, DashStyleHelper.Dot, 1);
+                
+                Draw.Rectangle(this, zona.TagVisualizacion + "_Rect", false,
+                    barsAgoD, zona.LimiteInferior,
+                    0, zona.LimiteSuperior,
+                    colorAnulada, colorRelleno, 1);
+            }
+            catch (Exception ex)
+            {
+                if (LogsDetallados)
+                {
+                    Print("Error dibujando zona anulada #" + zona.Id + ": " + ex.Message);
+                }
+            }
+        }
+        
+        // NUEVO: Método para dibujar zonas expiradas
+        private void DibujarZonaExpirada(ZonaPremium zona)
+        {
+            try
+            {
+                Brush colorExpirada = ColorZonaExpirada;
+                Brush colorRelleno = colorExpirada.Clone();
+                colorRelleno.Opacity = 0.05;
+                
+                double lineaCentral = (zona.LimiteInferior + zona.LimiteSuperior) / 2.0;
+                int barsAgoD = CurrentBar - zona.PuntoD.BarIndex;
+                if (barsAgoD < 0) barsAgoD = 0;
+                
+                Draw.Line(this, zona.TagVisualizacion, false,
+                    barsAgoD, lineaCentral,
+                    0, lineaCentral,
+                    colorExpirada, DashStyleHelper.DashDot, 1);
+                
+                Draw.Rectangle(this, zona.TagVisualizacion + "_Rect", false,
+                    barsAgoD, zona.LimiteInferior,
+                    0, zona.LimiteSuperior,
+                    colorExpirada, colorRelleno, 1);
+            }
+            catch (Exception ex)
+            {
+                if (LogsDetallados)
+                {
+                    Print("Error dibujando zona expirada #" + zona.Id + ": " + ex.Message);
+                }
+            }
+        }
+        #endregion
+        
+        #region Métodos Públicos de Acceso
+        [Browsable(false)]
+        [XmlIgnore]
+        public List<ZonaPremium> ZonasActivas
+        {
+            get { return zonasActivas?.Where(z => z.EstadoZona == 0).ToList() ?? new List<ZonaPremium>(); }
+        }
+        
+        [Browsable(false)]
+        [XmlIgnore]
+        public List<ZonaPremium> ZonasAjustadas
+        {
+            get { return zonasActivas?.Where(z => z.EstadoZona == 1).ToList() ?? new List<ZonaPremium>(); }
+        }
+        
+        [Browsable(false)]
+        [XmlIgnore]
+        public List<ZonaPremium> ZonasAnuladas
+        {
+            get { return zonasActivas?.Where(z => z.EstadoZona == 2).ToList() ?? new List<ZonaPremium>(); }
+        }
+        
+        // NUEVO: Propiedad para acceder a zonas expiradas
+        [Browsable(false)]
+        [XmlIgnore]
+        public List<ZonaPremium> ZonasExpiradas
+        {
+            get { return zonasActivas?.Where(z => z.EstadoZona == 4).ToList() ?? new List<ZonaPremium>(); }
+        }
+        
+        public bool PrecioEnZonaActiva(double precio)
+        {
+            return ZonasActivas.Any(z => z.PrecioEnZona(precio));
+        }
+        
+        public ZonaPremium ObtenerZonaPorPrecio(double precio)
+        {
+            return ZonasActivas
+                .Where(z => z.PrecioEnZona(precio))
+                .OrderByDescending(z => z.FechaCreacion)
+                .FirstOrDefault();
+        }
+        
+        // NUEVO: Método para obtener tiempo restante de una zona
+        public TimeSpan TiempoRestanteZona(ZonaPremium zona)
+        {
+            var tiempoRestante = zona.FechaExpiracion - Time[0];
+            return tiempoRestante > TimeSpan.Zero ? tiempoRestante : TimeSpan.Zero;
+        }
+        
+        [Browsable(false)]
+        [XmlIgnore]
+        public List<PivotInfo> Pivotes
+        {
+            get { return pivotPoints ?? new List<PivotInfo>(); }
+        }
+        #endregion
+    }
+}
+
+#region NinjaScript generated code. Neither change nor remove.
+
+namespace NinjaTrader.NinjaScript.Indicators
+{
+	public partial class Indicator : NinjaTrader.Gui.NinjaScript.IndicatorRenderBase
+	{
+		private IndicadorZonasPrimium[] cacheIndicadorZonasPrimium;
+		public IndicadorZonasPrimium IndicadorZonasPrimium(int umbralZonaPorcentaje, int tiempoVidaHoras, bool permitirAjusteZonas, bool mostrarZonasActivas, bool mostrarZonasAjustadas, bool mostrarZonasAnuladas, bool mostrarZonasExpiradas, bool retirarZonasAnuladas, bool retirarZonasExpiradas, int maximoZonasVisibles, bool logsDetallados, bool mostrarZigZag, bool mostrarEtiquetasPivotes, DeviationType tipoDesviacion, double valorDesviacion, bool usarHighLow)
+		{
+			return IndicadorZonasPrimium(Input, umbralZonaPorcentaje, tiempoVidaHoras, permitirAjusteZonas, mostrarZonasActivas, mostrarZonasAjustadas, mostrarZonasAnuladas, mostrarZonasExpiradas, retirarZonasAnuladas, retirarZonasExpiradas, maximoZonasVisibles, logsDetallados, mostrarZigZag, mostrarEtiquetasPivotes, tipoDesviacion, valorDesviacion, usarHighLow);
+		}
+
+		public IndicadorZonasPrimium IndicadorZonasPrimium(ISeries<double> input, int umbralZonaPorcentaje, int tiempoVidaHoras, bool permitirAjusteZonas, bool mostrarZonasActivas, bool mostrarZonasAjustadas, bool mostrarZonasAnuladas, bool mostrarZonasExpiradas, bool retirarZonasAnuladas, bool retirarZonasExpiradas, int maximoZonasVisibles, bool logsDetallados, bool mostrarZigZag, bool mostrarEtiquetasPivotes, DeviationType tipoDesviacion, double valorDesviacion, bool usarHighLow)
+		{
+			if (cacheIndicadorZonasPrimium != null)
+				for (int idx = 0; idx < cacheIndicadorZonasPrimium.Length; idx++)
+					if (cacheIndicadorZonasPrimium[idx] != null && cacheIndicadorZonasPrimium[idx].UmbralZonaPorcentaje == umbralZonaPorcentaje && cacheIndicadorZonasPrimium[idx].TiempoVidaHoras == tiempoVidaHoras && cacheIndicadorZonasPrimium[idx].PermitirAjusteZonas == permitirAjusteZonas && cacheIndicadorZonasPrimium[idx].MostrarZonasActivas == mostrarZonasActivas && cacheIndicadorZonasPrimium[idx].MostrarZonasAjustadas == mostrarZonasAjustadas && cacheIndicadorZonasPrimium[idx].MostrarZonasAnuladas == mostrarZonasAnuladas && cacheIndicadorZonasPrimium[idx].MostrarZonasExpiradas == mostrarZonasExpiradas && cacheIndicadorZonasPrimium[idx].RetirarZonasAnuladas == retirarZonasAnuladas && cacheIndicadorZonasPrimium[idx].RetirarZonasExpiradas == retirarZonasExpiradas && cacheIndicadorZonasPrimium[idx].MaximoZonasVisibles == maximoZonasVisibles && cacheIndicadorZonasPrimium[idx].LogsDetallados == logsDetallados && cacheIndicadorZonasPrimium[idx].MostrarZigZag == mostrarZigZag && cacheIndicadorZonasPrimium[idx].MostrarEtiquetasPivotes == mostrarEtiquetasPivotes && cacheIndicadorZonasPrimium[idx].TipoDesviacion == tipoDesviacion && cacheIndicadorZonasPrimium[idx].ValorDesviacion == valorDesviacion && cacheIndicadorZonasPrimium[idx].UsarHighLow == usarHighLow && cacheIndicadorZonasPrimium[idx].EqualsInput(input))
+						return cacheIndicadorZonasPrimium[idx];
+			return CacheIndicator<IndicadorZonasPrimium>(new IndicadorZonasPrimium(){ UmbralZonaPorcentaje = umbralZonaPorcentaje, TiempoVidaHoras = tiempoVidaHoras, PermitirAjusteZonas = permitirAjusteZonas, MostrarZonasActivas = mostrarZonasActivas, MostrarZonasAjustadas = mostrarZonasAjustadas, MostrarZonasAnuladas = mostrarZonasAnuladas, MostrarZonasExpiradas = mostrarZonasExpiradas, RetirarZonasAnuladas = retirarZonasAnuladas, RetirarZonasExpiradas = retirarZonasExpiradas, MaximoZonasVisibles = maximoZonasVisibles, LogsDetallados = logsDetallados, MostrarZigZag = mostrarZigZag, MostrarEtiquetasPivotes = mostrarEtiquetasPivotes, TipoDesviacion = tipoDesviacion, ValorDesviacion = valorDesviacion, UsarHighLow = usarHighLow }, input, ref cacheIndicadorZonasPrimium);
+		}
+	}
+}
+
+namespace NinjaTrader.NinjaScript.MarketAnalyzerColumns
+{
+	public partial class MarketAnalyzerColumn : MarketAnalyzerColumnBase
+	{
+		public Indicators.IndicadorZonasPrimium IndicadorZonasPrimium(int umbralZonaPorcentaje, int tiempoVidaHoras, bool permitirAjusteZonas, bool mostrarZonasActivas, bool mostrarZonasAjustadas, bool mostrarZonasAnuladas, bool mostrarZonasExpiradas, bool retirarZonasAnuladas, bool retirarZonasExpiradas, int maximoZonasVisibles, bool logsDetallados, bool mostrarZigZag, bool mostrarEtiquetasPivotes, DeviationType tipoDesviacion, double valorDesviacion, bool usarHighLow)
+		{
+			return indicator.IndicadorZonasPrimium(Input, umbralZonaPorcentaje, tiempoVidaHoras, permitirAjusteZonas, mostrarZonasActivas, mostrarZonasAjustadas, mostrarZonasAnuladas, mostrarZonasExpiradas, retirarZonasAnuladas, retirarZonasExpiradas, maximoZonasVisibles, logsDetallados, mostrarZigZag, mostrarEtiquetasPivotes, tipoDesviacion, valorDesviacion, usarHighLow);
+		}
+
+		public Indicators.IndicadorZonasPrimium IndicadorZonasPrimium(ISeries<double> input , int umbralZonaPorcentaje, int tiempoVidaHoras, bool permitirAjusteZonas, bool mostrarZonasActivas, bool mostrarZonasAjustadas, bool mostrarZonasAnuladas, bool mostrarZonasExpiradas, bool retirarZonasAnuladas, bool retirarZonasExpiradas, int maximoZonasVisibles, bool logsDetallados, bool mostrarZigZag, bool mostrarEtiquetasPivotes, DeviationType tipoDesviacion, double valorDesviacion, bool usarHighLow)
+		{
+			return indicator.IndicadorZonasPrimium(input, umbralZonaPorcentaje, tiempoVidaHoras, permitirAjusteZonas, mostrarZonasActivas, mostrarZonasAjustadas, mostrarZonasAnuladas, mostrarZonasExpiradas, retirarZonasAnuladas, retirarZonasExpiradas, maximoZonasVisibles, logsDetallados, mostrarZigZag, mostrarEtiquetasPivotes, tipoDesviacion, valorDesviacion, usarHighLow);
+		}
+	}
+}
+
+namespace NinjaTrader.NinjaScript.Strategies
+{
+	public partial class Strategy : NinjaTrader.Gui.NinjaScript.StrategyRenderBase
+	{
+		public Indicators.IndicadorZonasPrimium IndicadorZonasPrimium(int umbralZonaPorcentaje, int tiempoVidaHoras, bool permitirAjusteZonas, bool mostrarZonasActivas, bool mostrarZonasAjustadas, bool mostrarZonasAnuladas, bool mostrarZonasExpiradas, bool retirarZonasAnuladas, bool retirarZonasExpiradas, int maximoZonasVisibles, bool logsDetallados, bool mostrarZigZag, bool mostrarEtiquetasPivotes, DeviationType tipoDesviacion, double valorDesviacion, bool usarHighLow)
+		{
+			return indicator.IndicadorZonasPrimium(Input, umbralZonaPorcentaje, tiempoVidaHoras, permitirAjusteZonas, mostrarZonasActivas, mostrarZonasAjustadas, mostrarZonasAnuladas, mostrarZonasExpiradas, retirarZonasAnuladas, retirarZonasExpiradas, maximoZonasVisibles, logsDetallados, mostrarZigZag, mostrarEtiquetasPivotes, tipoDesviacion, valorDesviacion, usarHighLow);
+		}
+
+		public Indicators.IndicadorZonasPrimium IndicadorZonasPrimium(ISeries<double> input , int umbralZonaPorcentaje, int tiempoVidaHoras, bool permitirAjusteZonas, bool mostrarZonasActivas, bool mostrarZonasAjustadas, bool mostrarZonasAnuladas, bool mostrarZonasExpiradas, bool retirarZonasAnuladas, bool retirarZonasExpiradas, int maximoZonasVisibles, bool logsDetallados, bool mostrarZigZag, bool mostrarEtiquetasPivotes, DeviationType tipoDesviacion, double valorDesviacion, bool usarHighLow)
+		{
+			return indicator.IndicadorZonasPrimium(input, umbralZonaPorcentaje, tiempoVidaHoras, permitirAjusteZonas, mostrarZonasActivas, mostrarZonasAjustadas, mostrarZonasAnuladas, mostrarZonasExpiradas, retirarZonasAnuladas, retirarZonasExpiradas, maximoZonasVisibles, logsDetallados, mostrarZigZag, mostrarEtiquetasPivotes, tipoDesviacion, valorDesviacion, usarHighLow);
+		}
+	}
+}
+
+#endregion
