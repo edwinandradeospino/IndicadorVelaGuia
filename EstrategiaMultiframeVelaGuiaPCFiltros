@@ -1,0 +1,2167 @@
+Estrategia MultiFrame Vela Guía PC - Mejorada
+📈 Descripción
+Estrategia automatizada de trading para NinjaTrader 8 que detecta patrones de reversión de 3 pivotes (D-E-F) con múltiples filtros de validación y gestión automática de riesgo.
+🎯 Funcionalidades Principales
+Detección de Patrones
+
+Patrón de 3 Pivotes: Identifica automáticamente formaciones D-E-F usando indicador ZigZag
+Patrones Alcistas: Cuando el HIGH del pivote F supera el HIGH del pivote D
+Patrones Bajistas: Cuando el LOW del pivote F está por debajo del LOW del pivote D
+
+Sistema de Filtros Inteligentes
+
+Filtro Ratio: Valida la proporción entre segmentos del patrón (rango configurable)
+Filtro Size: Limita el tamaño máximo del patrón en ticks
+Filtro Zonas Premium: Verifica que el pivote E esté en zonas de alta probabilidad
+Filtro Horarios: Permite definir períodos de operaciones inactivas por día/hora
+
+Validación de Entrada
+
+Múltiples Velas de Reversión: Requiere N velas consecutivas de reversión para confirmar entrada
+Zona Probable: Calcula zona de entrada basada en porcentaje de retroceso E→F
+Protección contra Anulaciones: Cancela patrón si precio supera niveles críticos
+
+Gestión de Riesgo Automática
+
+Cálculo Dinámico de Contratos: Basado en riesgo objetivo en dólares
+Dos Modos de Operación: Con y sin inclusión de comisiones
+Stop Loss Configurable: Extremo de retroceso o nivel del pivote E
+Take Profit Automático: Relación riesgo:beneficio configurable (1:1 hasta 1:5)
+
+Monitoreo y Estadísticas
+
+Tracking en Tiempo Real: Seguimiento de recorridos máximos por patrón
+Reportes Estadísticos: Análisis de efectividad de filtros cada 15 minutos
+Distribución de Recorridos: Clasificación por intervalos de ticks
+Log de Operaciones: Registro detallado de todas las órdenes
+
+⚙️ Configuración Principal
+Parámetros de Patrón
+
+TamañoRenko: Tamaño de ladrillos Renko en ticks
+DesviacionZigZag: Sensibilidad del ZigZag en puntos
+RatioPatron: Relación máxima entre segmentos (1.0 - valor máximo)
+SizePatron: Tamaño máximo del patrón en ticks
+
+Filtros de Tiempo
+
+UsarFiltroHorario: Activar/desactivar filtro de horarios
+HoraInicioInactivo / HoraFinInactivo: Período de inactividad
+Días aplicables: Lunes a Domingo (configurables individualmente)
+
+Validación de Entrada
+
+ZonaProbablePorcentaje: Porcentaje de zona probable (0-100%)
+VelasReversionRequeridas: Número de velas consecutivas necesarias (1-10)
+
+Gestión de Capital
+
+RiesgoDolares: Riesgo objetivo por operación
+RelacionRiesgoBeneficio: Factor multiplicador para TP (1:1 a 1:5)
+TipoStopLoss: 1=Extremo retroceso, 2=Pivote E
+IncluirComisionesEnCalculos: Modo de cálculo con/sin comisiones
+
+🚀 Características Avanzadas
+
+Sistema Snapshot: Mantiene configuración de pivotes durante toda la operación
+Múltiples Timeframes: Compatible con datos Renko multiframe
+Debug Completo: Logs detallados para análisis y optimización
+Indicadores Visuales: Flechas de entrada opcionales en gráfico
+Gestión de Memoria: Optimizado para operación continua 24/7
+
+📊 Casos de Uso
+Ideal para:
+
+Trading automatizado en futuros e índices
+Estrategias de reversión en mercados con tendencia
+Operaciones en timeframes medianos (5m-1h)
+Gestión automática de múltiples posiciones
+Backtesting y optimización de parámetros
+
+📝 Versión
+Versión: MEJORADA
+Plataforma: NinjaTrader 8
+Lenguaje: C# .NET
+Estado: Producción
+
+
+#region Using declarations
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.ComponentModel.DataAnnotations;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+using System.Windows;
+using System.Windows.Input;
+using System.Windows.Media;
+using System.Xml.Serialization;
+using NinjaTrader.Cbi;
+using NinjaTrader.Gui;
+using NinjaTrader.Gui.Chart;
+using NinjaTrader.Gui.SuperDom;
+using NinjaTrader.Gui.Tools;
+using NinjaTrader.Data;
+using NinjaTrader.NinjaScript;
+using NinjaTrader.Core.FloatingPoint;
+using NinjaTrader.NinjaScript.Indicators;
+using NinjaTrader.NinjaScript.DrawingTools;
+#endregion
+
+namespace NinjaTrader.NinjaScript.Strategies
+{
+    public class EstrategiaMultiframeVelaGuiaPCFiltrosMejorada : Strategy
+    {
+        #region Variables
+        private IndicadorPivotesZigZag indicadorPivotes;
+        private IndicadorZonasPrimium indicadorZonasPremium;
+        
+        private bool patronAlcistaDetectado = false;
+        private bool patronBajistaDetectado = false;
+        private bool esperandoRetroceso = false;
+        private bool retrocesoenCurso = false;
+        private int contadorVelasRetroceso = 0;
+        private List<int> indicesRetroceso = new List<int>();
+        private double precioEntradaRetroceso = 0;
+        private double extremoRetroceso = 0;
+        
+        private PivotesSnapshot snapshotPivotes;
+        
+        private int patronesAlcistasDetectados = 0;
+        private int patronesBajistasDetectados = 0;
+        private DateTime ultimoReporteEstadisticas = DateTime.MinValue;
+        private List<string> ordenesLog = new List<string>();
+        
+        // ====== VARIABLES PARA TRACKING DE RECORRIDOS ======
+        private int patronesConReversionValida = 0;
+        private Dictionary<string, int> distribucionRecorridos = new Dictionary<string, int>();
+        private bool trackingRecorrido = false;
+        private double precioInicioTracking = 0;
+        private double recorridoMaximoTicks = 0;
+        private int patronActualId = 0;
+        
+        // ====== VARIABLES PARA TRACKING DE FILTROS ======
+        private int patronesRechazadosPorRatio = 0;
+        private int patronesRechazadosPorSize = 0;
+        private int patronesRechazadosPorZonas = 0;
+        private int patronesValidosTotal = 0;
+        
+        // ====== NUEVAS VARIABLES PARA OPERACIONES INACTIVAS ======
+        private int operacionesRechazadasPorHorario = 0;
+        
+        // ====== NUEVAS VARIABLES PARA VELAS DE REVERSIÓN ======
+        private List<bool> velasReversionConsecutivas = new List<bool>();
+        private int contadorVelasReversionValidas = 0;
+        
+        #endregion
+
+        #region Estructuras de Datos
+        
+        private class PivotesSnapshot
+        {
+            public double PrecioD { get; set; }
+            public double PrecioE { get; set; }
+            public double PrecioF { get; set; }
+            
+            public int IndiceD { get; set; }
+            public int IndiceE { get; set; }
+            public int IndiceF { get; set; }
+            
+            public bool IsHighD { get; set; }
+            public bool IsHighE { get; set; }
+            public bool IsHighF { get; set; }
+            
+            public double HighD { get; set; }
+            public double LowD { get; set; }
+            public double HighE { get; set; }
+            public double LowE { get; set; }
+            public double HighF { get; set; }
+            public double LowF { get; set; }
+            
+            public bool EsAlcista { get; set; }
+            public double ZonaProbableMin { get; set; }
+            public double ZonaProbableMax { get; set; }
+            public double PorcentajeZonaProbable { get; set; }
+            
+            // ====== NUEVAS PROPIEDADES PARA FILTROS ======
+            public double RatioCalculado { get; set; }
+            public double SizeCalculadoTicks { get; set; }
+            
+            public override string ToString()
+            {
+                return $"Patrón {(EsAlcista ? "ALCISTA" : "BAJISTA")}\n" +
+                       $"D:{PrecioD:F2}({(IsHighD ? "H" : "L")},idx:{IndiceD}), E:{PrecioE:F2}({(IsHighE ? "H" : "L")},idx:{IndiceE}), F:{PrecioF:F2}({(IsHighF ? "H" : "L")},idx:{IndiceF})\n" +
+                       $"Zona Probable: {ZonaProbableMin:F2} a {ZonaProbableMax:F2} ({PorcentajeZonaProbable}%)\n" +
+                       $"Ratio: {RatioCalculado:F2}, Size: {SizeCalculadoTicks:F0} ticks";
+            }
+        }
+        
+        #endregion
+
+        #region Parámetros
+
+        [NinjaScriptProperty]
+        [Range(1, 200)]
+        [Display(Name = "Tamaño Renko", Description = "Tamaño de los ladrillos Renko en ticks", Order = 1, GroupName = "1. Renko")]
+        public int TamanoRenko { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(0.1, 1000)]
+        [Display(Name = "Desviación ZigZag (Puntos)", Description = "Desviación mínima en Puntos para el ZigZag", Order = 2, GroupName = "2. ZigZag")]
+        public double DesviacionZigZag { get; set; }
+
+        // ====== NUEVOS FILTROS DE PATRÓN ======
+        [NinjaScriptProperty]
+        [Range(0.1, 10.0)]
+        [Display(Name = "Ratio Máximo Patrón", Description = "Relación máxima entre segmentos F-E y D-E (acepta valores entre 1.0 y este máximo)", Order = 3, GroupName = "2.1 Filtros Patrón")]
+        public double RatioPatron { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(1, 1000)]
+        [Display(Name = "Tamaño Máximo Patrón (Ticks)", Description = "Tamaño máximo del segmento F-E en ticks", Order = 4, GroupName = "2.1 Filtros Patrón")]
+        public int SizePatron { get; set; }
+
+        // ====== NUEVOS PARÁMETROS PARA OPERACIONES INACTIVAS ======
+        [NinjaScriptProperty]
+        [Display(Name = "Usar Filtro Horario", Description = "Activa/desactiva el filtro de operaciones inactivas por horario", Order = 5, GroupName = "2.2 Filtro Operaciones Inactivas")]
+        public bool UsarFiltroHorario { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(0, 23)]
+        [Display(Name = "Hora Inicio Inactivo", Description = "Hora de inicio del período inactivo (0-23)", Order = 6, GroupName = "2.2 Filtro Operaciones Inactivas")]
+        public int HoraInicioInactivo { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(0, 59)]
+        [Display(Name = "Minuto Inicio Inactivo", Description = "Minuto de inicio del período inactivo (0-59)", Order = 7, GroupName = "2.2 Filtro Operaciones Inactivas")]
+        public int MinutoInicioInactivo { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(0, 23)]
+        [Display(Name = "Hora Fin Inactivo", Description = "Hora de fin del período inactivo (0-23)", Order = 8, GroupName = "2.2 Filtro Operaciones Inactivas")]
+        public int HoraFinInactivo { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(0, 59)]
+        [Display(Name = "Minuto Fin Inactivo", Description = "Minuto de fin del período inactivo (0-59)", Order = 9, GroupName = "2.2 Filtro Operaciones Inactivas")]
+        public int MinutoFinInactivo { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Aplicar Lunes", Description = "Aplicar filtro horario los lunes", Order = 10, GroupName = "2.2 Filtro Operaciones Inactivas")]
+        public bool AplicarLunes { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Aplicar Martes", Description = "Aplicar filtro horario los martes", Order = 11, GroupName = "2.2 Filtro Operaciones Inactivas")]
+        public bool AplicarMartes { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Aplicar Miércoles", Description = "Aplicar filtro horario los miércoles", Order = 12, GroupName = "2.2 Filtro Operaciones Inactivas")]
+        public bool AplicarMiercoles { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Aplicar Jueves", Description = "Aplicar filtro horario los jueves", Order = 13, GroupName = "2.2 Filtro Operaciones Inactivas")]
+        public bool AplicarJueves { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Aplicar Viernes", Description = "Aplicar filtro horario los viernes", Order = 14, GroupName = "2.2 Filtro Operaciones Inactivas")]
+        public bool AplicarViernes { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Aplicar Sábado", Description = "Aplicar filtro horario los sábados", Order = 15, GroupName = "2.2 Filtro Operaciones Inactivas")]
+        public bool AplicarSabado { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Aplicar Domingo", Description = "Aplicar filtro horario los domingos", Order = 16, GroupName = "2.2 Filtro Operaciones Inactivas")]
+        public bool AplicarDomingo { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Usar Filtro Zonas Premium", Description = "Activa/desactiva el filtro de Zonas Premium", Order = 17, GroupName = "3. Filtro Zonas Premium")]
+        public bool UsarFiltroZonasPremium { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(0.1, 1000)]
+        [Display(Name = "Desviación ZigZag Zonas (Puntos)", Description = "Desviación específica para el ZigZag del indicador de Zonas Premium", Order = 18, GroupName = "3. Filtro Zonas Premium")]
+        public double DesviacionZigZagZonas { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(1, 100)]
+        [Display(Name = "Umbral Zona Premium (%)", Description = "Porcentaje de zona premium para el indicador", Order = 19, GroupName = "3. Filtro Zonas Premium")]
+        public int UmbralZonaPremiumPorcentaje { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(1, 48)]
+        [Display(Name = "Tiempo Vida Zonas (Horas)", Description = "Tiempo de vida de las zonas premium en horas", Order = 20, GroupName = "3. Filtro Zonas Premium")]
+        public int TiempoVidaZonasHoras { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Permitir Ajuste Zonas", Description = "Permite ajuste automático de zonas premium", Order = 21, GroupName = "3. Filtro Zonas Premium")]
+        public bool PermitirAjusteZonas { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Usar High/Low Zonas", Description = "Usar High/Low para el ZigZag de zonas premium", Order = 22, GroupName = "3. Filtro Zonas Premium")]
+        public bool UsarHighLowZonas { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(1, 50)]
+        [Display(Name = "Máximo Zonas Visibles", Description = "Número máximo de zonas premium visibles", Order = 23, GroupName = "3. Filtro Zonas Premium")]
+        public int MaximoZonasVisibles { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Retirar Zonas Expiradas", Description = "Retirar automáticamente zonas expiradas del gráfico", Order = 24, GroupName = "3. Filtro Zonas Premium")]
+        public bool RetirarZonasExpiradas { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(0, 100)]
+        [Display(Name = "Zona Probable (%)", Description = "Porcentaje de zona probable desde PivoteE hacia PivoteF", Order = 25, GroupName = "4. Entrada")]
+        public int ZonaProbablePorcentaje { get; set; }
+
+        // ====== NUEVO PARÁMETRO PARA VELAS DE REVERSIÓN ======
+        [NinjaScriptProperty]
+        [Range(1, 10)]
+        [Display(Name = "Velas Reversión Requeridas", Description = "Número de velas de reversión consecutivas requeridas para validar entrada", Order = 26, GroupName = "4. Entrada")]
+        public int VelasReversionRequeridas { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Tipo Stop Loss", Description = "1=Extremo última vela retroceso, 2=Extremo PivoteE", Order = 27, GroupName = "5. Stop Loss")]
+        public int TipoStopLoss { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(0, 100)]
+        [Display(Name = "Ticks Deslizamiento SL", Description = "Ticks adicionales para el stop loss (solo para Tipo 1)", Order = 28, GroupName = "5. Stop Loss")]
+        public int TicksDeslizamientoSL { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(1, 5)]
+        [Display(Name = "Relación Riesgo:Beneficio", Description = "1=1:1, 2=1:2, 3=1:3, 4=1:4, 5=1:5", Order = 29, GroupName = "6. Take Profit")]
+        public int RelacionRiesgoBeneficio { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(1, 10000)]
+        [Display(Name = "Riesgo ($)", Description = "Riesgo en dólares por operación", Order = 30, GroupName = "7. Gestión de Capital")]
+        public int RiesgoDolares { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(0, 100)]
+        [Display(Name = "Comisión ($)", Description = "Comisión por contrato", Order = 31, GroupName = "7. Gestión de Capital")]
+        public double ComisionPorContrato { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(0.01, 100)]
+        [Display(Name = "Precio del Tick ($)", Description = "Valor en dólares de un tick", Order = 32, GroupName = "7. Gestión de Capital")]
+        public double PrecioDelTick { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Incluir Comisiones en Cálculos", Description = "True=Incluir comisiones, False=Excluir comisiones", Order = 33, GroupName = "7. Gestión de Capital")]
+        public bool IncluirComisionesEnCalculos { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Mostrar Debug", Description = "Habilita mensajes de debug detallados", Order = 34, GroupName = "8. Debug")]
+        public bool MostrarDebug { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Mostrar Flechas", Description = "Muestra flechas de entrada", Order = 35, GroupName = "8. Debug")]
+        public bool MostrarFlechas { get; set; }
+
+        #endregion
+
+        #region OnStateChange
+
+        protected override void OnStateChange()
+        {
+            if (State == State.SetDefaults)
+            {
+                Description = "Estrategia MultiFrame basada en patrón de 3 pivotes (D-E-F) con Vela Guía PC, filtros de Ratio y Size, Operaciones Inactivas y múltiples velas de reversión - VERSIÓN MEJORADA";
+                Name = "EstrategiaMultiframeVelaGuiaPCFiltros";
+                Calculate = Calculate.OnBarClose;
+                EntriesPerDirection = 1;
+                EntryHandling = EntryHandling.AllEntries;
+                IsExitOnSessionCloseStrategy = true;
+                ExitOnSessionCloseSeconds = 30;
+                IsFillLimitOnTouch = false;
+                MaximumBarsLookBack = MaximumBarsLookBack.TwoHundredFiftySix;
+                OrderFillResolution = OrderFillResolution.Standard;
+                Slippage = 0;
+                StartBehavior = StartBehavior.WaitUntilFlat;
+                TimeInForce = TimeInForce.Gtc;
+                TraceOrders = false;
+                RealtimeErrorHandling = RealtimeErrorHandling.StopCancelClose;
+                StopTargetHandling = StopTargetHandling.PerEntryExecution;
+                BarsRequiredToTrade = 20;
+                IsInstantiatedOnEachOptimizationIteration = true;
+
+                TamanoRenko = 50;
+                DesviacionZigZag = 2.0;
+                
+                // ====== VALORES POR DEFECTO PARA NUEVOS FILTROS ======
+                RatioPatron = 2.0;
+                SizePatron = 100;
+                
+                // ====== VALORES POR DEFECTO PARA OPERACIONES INACTIVAS ======
+                UsarFiltroHorario = false;
+                HoraInicioInactivo = 12;
+                MinutoInicioInactivo = 0;
+                HoraFinInactivo = 14;
+                MinutoFinInactivo = 0;
+                AplicarLunes = true;
+                AplicarMartes = true;
+                AplicarMiercoles = true;
+                AplicarJueves = true;
+                AplicarViernes = true;
+                AplicarSabado = false;
+                AplicarDomingo = false;
+                
+                UsarFiltroZonasPremium = false;
+                DesviacionZigZagZonas = 6.0;
+                UmbralZonaPremiumPorcentaje = 30;
+                TiempoVidaZonasHoras = 24;
+                PermitirAjusteZonas = true;
+                UsarHighLowZonas = true;
+                MaximoZonasVisibles = 10;
+                RetirarZonasExpiradas = true;
+                ZonaProbablePorcentaje = 50;
+                
+                // ====== VALOR POR DEFECTO PARA VELAS DE REVERSIÓN ======
+                VelasReversionRequeridas = 1;
+                
+                TipoStopLoss = 1;
+                TicksDeslizamientoSL = 5;
+                RelacionRiesgoBeneficio = 2;
+                RiesgoDolares = 50;
+                ComisionPorContrato = 4.0;
+                PrecioDelTick = 0.25;
+                IncluirComisionesEnCalculos = true;
+                MostrarDebug = true;
+                MostrarFlechas = true;
+            }
+            else if (State == State.Configure)
+            {
+                if (TipoStopLoss != 1 && TipoStopLoss != 2)
+                {
+                    Print("ERROR: Tipo Stop Loss debe ser 1 o 2");
+                    return;
+                }
+
+                if (VelasReversionRequeridas < 1 || VelasReversionRequeridas > 10)
+                {
+                    Print("ERROR: Velas Reversión Requeridas debe estar entre 1 y 10");
+                    return;
+                }
+
+                // ====== VALIDACIÓN DE HORARIOS ======
+                if (UsarFiltroHorario)
+                {
+                    TimeSpan horaInicio = new TimeSpan(HoraInicioInactivo, MinutoInicioInactivo, 0);
+                    TimeSpan horaFin = new TimeSpan(HoraFinInactivo, MinutoFinInactivo, 0);
+                    
+                    if (horaInicio >= horaFin)
+                    {
+                        Print("ADVERTENCIA: La hora de inicio del período inactivo debe ser anterior a la hora de fin");
+                        Print("Si deseas un período que cruce medianoche, ajusta la lógica manualmente");
+                    }
+                }
+
+                AddRenko(Instrument.FullName, TamanoRenko, MarketDataType.Last);
+            }
+            else if (State == State.DataLoaded)
+            {
+                try
+                {
+                    indicadorPivotes = IndicadorPivotesZigZag(Closes[1], DeviationType.Points, DesviacionZigZag, true, 12);
+                    
+                    if (indicadorPivotes == null)
+                    {
+                        Print("ERROR CRÍTICO: No se pudo crear IndicadorPivotesZigZag");
+                        return;
+                    }
+                    
+                    // Inicializar indicador de Zonas Premium si el filtro está activo
+                    if (UsarFiltroZonasPremium)
+                    {
+                        try
+                        {
+                            indicadorZonasPremium = IndicadorZonasPrimium(Closes[1], 
+                                UmbralZonaPremiumPorcentaje, 
+                                TiempoVidaZonasHoras, 
+                                PermitirAjusteZonas,   
+                                false, // MostrarZonasActivas 
+                                false, // MostrarZonasAjustadas
+                                false, // MostrarZonasAnuladas
+                                false, // MostrarZonasExpiradas
+                                true,  // RetirarZonasAnuladas
+                                RetirarZonasExpiradas, 
+                                MaximoZonasVisibles,   
+                                false, // LogsDetallados 
+                                false, // MostrarZigZag 
+                                false, // MostrarEtiquetasPivotes
+                                DeviationType.Points, 
+                                DesviacionZigZagZonas, 
+                                UsarHighLowZonas);     
+                            
+                            if (indicadorZonasPremium == null)
+                            {
+                                Print("ERROR CRÍTICO: No se pudo crear IndicadorZonasPrimium");
+                                UsarFiltroZonasPremium = false; 
+                                Print("Filtro Zonas Premium DESACTIVADO automáticamente por error");
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Print($"ERROR creando IndicadorZonasPrimium: {ex.Message}");
+                            UsarFiltroZonasPremium = false; 
+                            Print("Filtro Zonas Premium DESACTIVADO automáticamente por error");
+                        }
+                    }
+                    
+                    ResetEstadoEstrategiaFiltros();
+                }
+                catch (Exception ex)
+                {
+                    Print($"ERROR CRÍTICO en OnStateChange DataLoaded: {ex.Message}");
+                    Print($"STACK TRACE: {ex.StackTrace}");
+                    return;
+                }
+                
+                // ====== INICIALIZAR INTERVALOS DE RECORRIDO ======
+                distribucionRecorridos["[1-16]"] = 0;
+                distribucionRecorridos["[17-32]"] = 0;
+                distribucionRecorridos["[33-48]"] = 0;
+                distribucionRecorridos["[49-64]"] = 0;
+                distribucionRecorridos["[65-80]"] = 0;
+                distribucionRecorridos["[81-96]"] = 0;
+                distribucionRecorridos["[97-112]"] = 0;
+                distribucionRecorridos["[113-128]"] = 0;
+                distribucionRecorridos["[129-144]"] = 0;
+                distribucionRecorridos["[145-160]"] = 0;
+                distribucionRecorridos["[160+]"] = 0;
+                
+                if (indicadorPivotes == null)
+                {
+                    Print("❌ ERROR CRÍTICO: No se pudo crear el indicador de pivotes");
+                    return;
+                }
+                
+                Print("========================================");
+                Print("=== ESTRATEGIA MULTIFRAME VELA GUÍA PC MEJORADA ===");
+                Print("===    CON FILTROS RATIO, SIZE Y OPERACIONES     ===");
+                Print("===         INACTIVAS + MÚLTIPLES VELAS          ===");
+                Print("========================================");
+                Print($"Tamaño Renko: {TamanoRenko} ticks");
+                Print($"Desviación ZigZag PATRÓN: {DesviacionZigZag} puntos");
+                Print($"Desviación ZigZag EN INDICADOR: {indicadorPivotes.DeviationValue} puntos");
+                
+                if (Math.Abs(indicadorPivotes.DeviationValue - DesviacionZigZag) > 0.001)
+                {
+                    Print("⚠️⚠️⚠️ ADVERTENCIA ⚠️⚠️⚠️");
+                    Print($"El indicador tiene una desviación DIFERENTE a la configurada!");
+                    Print($"Configurada: {DesviacionZigZag}, En indicador: {indicadorPivotes.DeviationValue}");
+                    Print($"SOLUCIÓN: REINICIA la estrategia completamente");
+                    Print("⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️");
+                }
+                
+                Print("========================================");
+                Print("=== FILTROS DE PATRÓN ===");
+                Print($"Ratio Máximo: {RatioPatron:F2} (acepta rango [1.0 - {RatioPatron:F2}])");
+                Print($"Size Máximo: {SizePatron} ticks");
+                Print("========================================");
+                
+                Print("=== FILTRO OPERACIONES INACTIVAS ===");
+                Print($"Filtro Horario: {(UsarFiltroHorario ? "ACTIVO" : "DESACTIVADO")}");
+                if (UsarFiltroHorario)
+                {
+                    Print($"  Horario Inactivo: {HoraInicioInactivo:D2}:{MinutoInicioInactivo:D2} - {HoraFinInactivo:D2}:{MinutoFinInactivo:D2}");
+                    List<string> diasActivos = new List<string>();
+                    if (AplicarLunes) diasActivos.Add("Lun");
+                    if (AplicarMartes) diasActivos.Add("Mar");
+                    if (AplicarMiercoles) diasActivos.Add("Mié");
+                    if (AplicarJueves) diasActivos.Add("Jue");
+                    if (AplicarViernes) diasActivos.Add("Vie");
+                    if (AplicarSabado) diasActivos.Add("Sáb");
+                    if (AplicarDomingo) diasActivos.Add("Dom");
+                    Print($"  Días aplicables: {string.Join(", ", diasActivos)}");
+                }
+                Print("========================================");
+                
+                Print($"Filtro Zonas Premium: {(UsarFiltroZonasPremium ? "ACTIVO" : "DESACTIVADO")}");
+                if (UsarFiltroZonasPremium)
+                {
+                    Print($"  Desviación ZigZag ZONAS: {DesviacionZigZagZonas} puntos");
+                    Print($"  Umbral Zona Premium: {UmbralZonaPremiumPorcentaje}%");
+                    Print($"  Tiempo Vida Zonas: {TiempoVidaZonasHoras} horas");
+                    Print($"  Permitir Ajuste: {PermitirAjusteZonas}");
+                    Print($"  Usar High/Low: {UsarHighLowZonas}");
+                    Print($"  Máximo Zonas: {MaximoZonasVisibles}");
+                    Print($"  Retirar Expiradas: {RetirarZonasExpiradas}");
+                }
+                Print($"Zona Probable: {ZonaProbablePorcentaje}%");
+                Print($"Velas Reversión Requeridas: {VelasReversionRequeridas}");
+                Print($"Tipo Stop Loss: {TipoStopLoss} {(TipoStopLoss == 1 ? $"(+{TicksDeslizamientoSL} ticks)" : "(Extremo PivoteE)")}");
+                Print($"Relación R:B = 1:{RelacionRiesgoBeneficio}");
+                Print($"Riesgo: ${RiesgoDolares}, Comisión: ${ComisionPorContrato}, Precio Tick: ${PrecioDelTick}");
+                Print($"Modo Comisiones: {(IncluirComisionesEnCalculos ? "INCLUIDAS" : "EXCLUIDAS")}");
+                Print($"Tick Size: {TickSize}");
+                Print($"Debug: {(MostrarDebug ? "ACTIVADO" : "DESACTIVADO")}");
+                Print("========================================");
+            }
+        }
+
+        #endregion
+
+        #region OnBarUpdate
+
+        protected override void OnBarUpdate()
+        {
+            if (BarsInProgress != 1) return;
+
+            if (CurrentBars[1] < 100)
+            {
+                if (MostrarDebug && CurrentBars[1] % 20 == 0)
+                    Print($"[BARRA {CurrentBars[1]}] Barras insuficientes: {CurrentBars[1]}/100 requeridas");
+                return;
+            }
+
+            // ====== TRACKING DE RECORRIDO MÁXIMO ======
+            if (trackingRecorrido && Position.MarketPosition == MarketPosition.Flat)
+            {
+                ActualizarRecorridoMaximo();
+            }
+
+            if (MostrarDebug && CurrentBars[1] % 100 == 0)
+            {
+                Print($"╔═══════════════════════════════════════════════════╗");
+                Print($"║ ESTADO GENERAL - BARRA {CurrentBars[1],6}                  ║");
+                Print($"╠═══════════════════════════════════════════════════╣");
+                Print($"║ Precio actual: {Closes[1][0],10:F2}                    ║");
+                Print($"║ Hora actual: {Time[0]:HH:mm:ss}                        ║");
+                Print($"║ Posición: {Position.MarketPosition,-15}              ║");
+                Print($"║ Patrón Alcista: {patronAlcistaDetectado,-5}                    ║");
+                Print($"║ Patrón Bajista: {patronBajistaDetectado,-5}                    ║");
+                Print($"║ Esperando Retroceso: {esperandoRetroceso,-5}                ║");
+                Print($"║ Retroceso en Curso: {retrocesoenCurso,-5}                 ║");
+                Print($"║ Tracking Activo: {trackingRecorrido,-5}                    ║");
+                Print($"║ Filtro Ratio: {RatioPatron,-5:F2}                         ║");
+                Print($"║ Filtro Size: {SizePatron,-5} ticks                     ║");
+                Print($"║ Filtro Horario: {(UsarFiltroHorario ? "ACTIVO" : "INACTIVO"),-8}          ║");
+                Print($"║ Filtro Zonas Premium: {(UsarFiltroZonasPremium ? "ACTIVO" : "INACTIVO"),-8}          ║");
+                Print($"║ Velas Reversión: {VelasReversionRequeridas,-2}                         ║");
+                Print($"║ Modo Comisiones: {(IncluirComisionesEnCalculos ? "INCLUIDAS" : "EXCLUIDAS"),-10}         ║");
+                Print($"╚═══════════════════════════════════════════════════╝");
+                
+                // ====== DEBUG ESPECÍFICO DEL INDICADOR ZONAS PREMIUM ======
+                if (UsarFiltroZonasPremium && indicadorZonasPremium != null)
+                {
+                    try
+                    {
+                        indicadorZonasPremium.Update();
+                        var zonasActivas = indicadorZonasPremium.ZonasActivas;
+                        var zonasAjustadas = indicadorZonasPremium.ZonasAjustadas;
+                        var zonasAnuladas = indicadorZonasPremium.ZonasAnuladas;
+                        var zonasExpiradas = indicadorZonasPremium.ZonasExpiradas;
+                        
+                        Print($"╔═══════════════════════════════════════════════════╗");
+                        Print($"║ ESTADO INDICADOR ZONAS PREMIUM - BARRA {CurrentBars[1],6}   ║");
+                        Print($"╠═══════════════════════════════════════════════════╣");
+                        Print($"║ Zonas Activas: {zonasActivas.Count,-3}                            ║");
+                        Print($"║ Zonas Ajustadas: {zonasAjustadas.Count,-3}                          ║");
+                        Print($"║ Zonas Anuladas: {zonasAnuladas.Count,-3}                           ║");
+                        Print($"║ Zonas Expiradas: {zonasExpiradas.Count,-3}                          ║");
+                        Print($"╠═══════════════════════════════════════════════════╣");
+                        
+                        if (zonasActivas.Count > 0)
+                        {
+                            Print($"║ ZONAS ACTIVAS DETECTADAS:                     ║");
+                            for (int i = 0; i < Math.Min(zonasActivas.Count, 3); i++)
+                            {
+                                var zona = zonasActivas[i];
+                                string tipo = zona.EsAlcista ? "ALCISTA" : "BAJISTA";
+                                Print($"║ #{zona.Id,-2} {tipo,-8} [{zona.LimiteInferior:F2} - {zona.LimiteSuperior:F2}]    ║");
+                            }
+                        }
+                        else
+                        {
+                            Print($"║ ❌ NO HAY ZONAS ACTIVAS                        ║");
+                        }
+                        
+                        Print($"╚═══════════════════════════════════════════════════╝");
+                    }
+                    catch (Exception ex)
+                    {
+                        Print($"ERROR leyendo estado Zonas Premium: {ex.Message}");
+                    }
+                }
+            }
+
+            GenerarReporteEstadisticas();
+
+            if (Position.MarketPosition != MarketPosition.Flat)
+            {
+                if (MostrarDebug && CurrentBars[1] % 20 == 0)
+                    Print($"[BARRA {CurrentBars[1]}] Posición activa: {Position.MarketPosition}, Cantidad: {Position.Quantity}");
+                return;
+            }
+
+            DetectarPatronTresPivotes();
+
+            if (patronAlcistaDetectado || patronBajistaDetectado)
+            {
+                BuscarEntradaMultiframe();
+            }
+        }
+
+        #endregion
+
+        #region Detección de Patrón - PATRÓN 3 PIVOTES (D-E-F) CON FILTROS
+
+        private void DetectarPatronTresPivotes()
+        {
+            if (indicadorPivotes == null)
+            {
+                Print($"[BARRA {CurrentBars[1]}] ❌ ERROR CRÍTICO: indicadorPivotes es NULL");
+                return;
+            }
+
+            if (MostrarDebug && CurrentBars[1] % 100 == 0)
+            {
+                Print($"╔══════════════════════════════════════════════════╗");
+                Print($"║ DIAGNÓSTICO COMPLETO DEL INDICADOR - BARRA {CurrentBars[1],5} ║");
+                Print($"╠══════════════════════════════════════════════════╣");
+                
+                try
+                {
+                    Print($"║ Parámetros del indicador:                       ║");
+                    Print($"║   DeviationType: {indicadorPivotes.DeviationType}                      ║");
+                    Print($"║   DeviationValue: {indicadorPivotes.DeviationValue:F2}                        ║");
+                    Print($"║   UseHighLow: {indicadorPivotes.UseHighLow}                           ║");
+                    Print($"║                                                  ║");
+                    Print($"║ Estado del indicador:                           ║");
+                    Print($"║   IsValidDataPoint(0): {indicadorPivotes.IsValidDataPoint(0)}                  ║");
+                    Print($"║   Value[0]: {indicadorPivotes[0]:F2}                            ║");
+                    Print($"║   Count: {indicadorPivotes.Count}                              ║");
+                    Print($"║   CurrentBar: {indicadorPivotes.CurrentBar}                         ║");
+                    
+                    if (indicadorPivotes.Pivotes != null)
+                    {
+                        Print($"║   Pivotes.Count: {indicadorPivotes.Pivotes.Count}                           ║");
+                    }
+                    else
+                    {
+                        Print($"║   Pivotes: NULL                                  ║");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Print($"║ Error leyendo propiedades: {ex.Message}");
+                }
+                
+                Print($"╚══════════════════════════════════════════════════╝");
+            }
+
+            try
+            {
+                indicadorPivotes.Update();
+            }
+            catch (Exception ex)
+            {
+                if (MostrarDebug)
+                    Print($"[BARRA {CurrentBars[1]}] Advertencia al actualizar indicador: {ex.Message}");
+            }
+
+            if (indicadorPivotes.Pivotes == null)
+            {
+                if (MostrarDebug && CurrentBars[1] % 100 == 0)
+                {
+                    Print($"[BARRA {CurrentBars[1]}] ⚠️ ADVERTENCIA: Lista de pivotes es NULL");
+                }
+                return;
+            }
+
+            int cantidadPivotes = indicadorPivotes.Pivotes.Count;
+            
+            if (MostrarDebug && CurrentBars[1] % 50 == 0)
+            {
+                Print($"═══════════════════════════════════════════════");
+                Print($"[BARRA {CurrentBars[1]}] DIAGNÓSTICO PIVOTES:");
+                Print($"Cantidad de pivotes disponibles: {cantidadPivotes}");
+                Print($"Precio actual: H:{Highs[1][0]:F2} L:{Lows[1][0]:F2} C:{Closes[1][0]:F2}");
+                
+                if (cantidadPivotes > 0)
+                {
+                    Print($"Pivotes detectados:");
+                    foreach (var p in indicadorPivotes.Pivotes)
+                    {
+                        Print($"  - Pivote {p.Label}: Precio={p.Price:F2}, Idx={p.BarIndex}, IsHigh={p.IsHigh}");
+                    }
+                }
+                Print($"═══════════════════════════════════════════════");
+            }
+
+            // Necesitamos al menos 3 pivotes para el patrón D-E-F
+            if (cantidadPivotes < 3)
+            {
+                if (CurrentBars[1] % 200 == 0)
+                {
+                    Print($"[BARRA {CurrentBars[1]}] Pivotes insuficientes: {cantidadPivotes}/3 requeridos");
+                    if (UsarFiltroZonasPremium && indicadorZonasPremium != null)
+                    {
+                        try
+                        {
+                            indicadorZonasPremium.Update();
+                            var zonasActivas = indicadorZonasPremium.ZonasActivas;
+                            Print($"  (Zonas Premium activas disponibles: {zonasActivas.Count})");
+                        }
+                        catch (Exception ex)
+                        {
+                            Print($"  (Error verificando Zonas Premium: {ex.Message})");
+                        }
+                    }
+                }
+                return;
+            }
+
+            if ((patronAlcistaDetectado || patronBajistaDetectado) && (esperandoRetroceso || retrocesoenCurso))
+            {
+                if (MostrarDebug && CurrentBars[1] % 20 == 0)
+                {
+                    Print($"[BARRA {CurrentBars[1]}] ⏳ Patrón en proceso, usando SNAPSHOT guardado:");
+                    if (snapshotPivotes != null)
+                    {
+                        Print($"  Tipo: {(snapshotPivotes.EsAlcista ? "ALCISTA" : "BAJISTA")}");
+                        Print($"  E: {snapshotPivotes.PrecioE:F2} (Idx: {snapshotPivotes.IndiceE})");
+                        Print($"  F: {snapshotPivotes.PrecioF:F2} (Idx: {snapshotPivotes.IndiceF})");
+                        Print($"  Zona Probable: [{snapshotPivotes.ZonaProbableMin:F2} - {snapshotPivotes.ZonaProbableMax:F2}]");
+                        Print($"  Ratio: {snapshotPivotes.RatioCalculado:F2}, Size: {snapshotPivotes.SizeCalculadoTicks:F0} ticks");
+                    }
+                }
+                return;
+            }
+
+            var pivotDNullable = indicadorPivotes.GetPivotByLabel('D');
+            var pivotENullable = indicadorPivotes.GetPivotByLabel('E');
+            var pivotFNullable = indicadorPivotes.GetPivotByLabel('F');
+
+            if (pivotDNullable == null || pivotENullable == null || pivotFNullable == null)
+            {
+                if (MostrarDebug && CurrentBars[1] % 100 == 0)
+                {
+                    Print($"[BARRA {CurrentBars[1]}] ERROR: Uno o más pivotes no disponibles:");
+                    Print($"  D:{pivotDNullable != null}, E:{pivotENullable != null}, F:{pivotFNullable != null}");
+                }
+                return;
+            }
+
+            var pivotD = pivotDNullable.Value;
+            var pivotE = pivotENullable.Value;
+            var pivotF = pivotFNullable.Value;
+
+            // LÓGICA DEL PATRÓN:
+            // PATRÓN ALCISTA: HIGH del PivoteF > HIGH del PivoteD
+            // PATRÓN BAJISTA: LOW del PivoteF < LOW del PivoteD
+            bool patronAlcista = pivotF.High > pivotD.High;
+            bool patronBajista = pivotF.Low < pivotD.Low;
+
+            if (MostrarDebug && CurrentBars[1] % 20 == 0)
+            {
+                Print($"[BARRA {CurrentBars[1]}] EVALUACIÓN PATRÓN 3 PIVOTES:");
+                Print($"  D={pivotD.Price:F2}(H:{pivotD.High:F2}, L:{pivotD.Low:F2}), E={pivotE.Price:F2}(H:{pivotE.High:F2}, L:{pivotE.Low:F2}), F={pivotF.Price:F2}(H:{pivotF.High:F2}, L:{pivotF.Low:F2})");
+                Print($"  Patrón Alcista (F.High > D.High): {pivotF.High:F2} > {pivotD.High:F2} = {patronAlcista}");
+                Print($"  Patrón Bajista (F.Low < D.Low): {pivotF.Low:F2} < {pivotD.Low:F2} = {patronBajista}");
+            }
+
+            if (!patronAlcista && !patronBajista)
+            {
+                return;
+            }
+
+            // ====== APLICAR NUEVOS FILTROS DE PATRÓN ======
+            if (!VerificarFiltrosPatron(pivotD, pivotE, pivotF, patronAlcista))
+            {
+                return; // Patrón rechazado por filtros Ratio o Size
+            }
+
+            // ====== VERIFICAR FILTRO DE ZONAS PREMIUM ======
+            if (UsarFiltroZonasPremium)
+            {
+                if (MostrarDebug)
+                    Print($"[BARRA {CurrentBars[1]}] Aplicando filtro Zonas Premium...");
+                    
+                if (!VerificarFiltroZonasPremiumMultiframe(pivotE, patronAlcista))
+                {
+                    patronesRechazadosPorZonas++;
+                    if (MostrarDebug)
+                    {
+                        Print($"[BARRA {CurrentBars[1]}] ❌ PATRÓN RECHAZADO por filtro Zonas Premium");
+                        Print($"  PivoteE: {pivotE.Price:F2} - Patrón: {(patronAlcista ? "ALCISTA" : "BAJISTA")}");
+                    }
+                    return;
+                }
+                
+                if (MostrarDebug)
+                    Print($"[BARRA {CurrentBars[1]}] ✅ PATRÓN APROBADO por filtro Zonas Premium");
+            }
+            else
+            {
+                if (MostrarDebug)
+                    Print($"[BARRA {CurrentBars[1]}] Filtro Zonas Premium DESACTIVADO - Patrón permitido");
+            }
+
+            GuardarSnapshotPivotesMultiframe(patronAlcista);
+            patronesValidosTotal++;
+
+            if (patronAlcista && !patronAlcistaDetectado)
+            {
+                patronAlcistaDetectado = true;
+                patronesAlcistasDetectados++;
+                esperandoRetroceso = true;
+                
+                Print("╔════════════════════════════════════════════════╗");
+                Print($"║   PATRÓN ALCISTA DETECTADO - BARRA {CurrentBars[1],6}      ║");
+                Print("╚════════════════════════════════════════════════╝");
+                Print(snapshotPivotes.ToString());
+                Print("✓ SNAPSHOT GUARDADO - Se mantendrá hasta cerrar la orden");
+                
+                if (MostrarFlechas)
+                {
+                    Draw.ArrowUp(this, "PatronAlcista" + CurrentBars[1], true, 0, 
+                        Lows[1][0] - 10 * TickSize, Brushes.LimeGreen);
+                }
+            }
+            else if (patronBajista && !patronBajistaDetectado)
+            {
+                patronBajistaDetectado = true;
+                patronesBajistasDetectados++;
+                esperandoRetroceso = true;
+                
+                Print("╔════════════════════════════════════════════════╗");
+                Print($"║   PATRÓN BAJISTA DETECTADO - BARRA {CurrentBars[1],6}      ║");
+                Print("╚════════════════════════════════════════════════╝");
+                Print(snapshotPivotes.ToString());
+                Print("✓ SNAPSHOT GUARDADO - Se mantendrá hasta cerrar la orden");
+                
+                if (MostrarFlechas)
+                {
+                    Draw.ArrowDown(this, "PatronBajista" + CurrentBars[1], true, 0, 
+                        Highs[1][0] + 10 * TickSize, Brushes.OrangeRed);
+                }
+            }
+        }
+
+        #endregion
+
+        #region Nuevos Filtros de Patrón
+
+        private bool VerificarFiltrosPatron(IndicadorPivotesZigZag.PivotPoint pivotD, 
+                                           IndicadorPivotesZigZag.PivotPoint pivotE, 
+                                           IndicadorPivotesZigZag.PivotPoint pivotF, 
+                                           bool patronEsAlcista)
+        {
+            double ratio, sizeEnTicks;
+            
+            if (patronEsAlcista)
+            {
+                // PATRÓN ALCISTA
+                // Ratio = (HIGH.PivoteF - LOW.PivoteE) / (HIGH.PivoteD - LOW.PivoteE)
+                // Size = HIGH.PivoteF - LOW.PivoteE
+                
+                double segmentoFE = pivotF.High - pivotE.Low;
+                double segmentoDE = pivotD.High - pivotE.Low;
+                
+                if (Math.Abs(segmentoDE) < 0.0001) // Evitar división por cero
+                {
+                    if (MostrarDebug)
+                        Print($"[BARRA {CurrentBars[1]}] ❌ ERROR: Segmento D-E es cero en patrón alcista");
+                    return false;
+                }
+                
+                ratio = segmentoFE / segmentoDE;
+                sizeEnTicks = segmentoFE / TickSize;
+            }
+            else
+            {
+                // PATRÓN BAJISTA
+                // Ratio = (HIGH.PivoteE - LOW.PivoteF) / (HIGH.PivoteE - LOW.PivoteD)
+                // Size = HIGH.PivoteE - LOW.PivoteF
+                
+                double segmentoEF = pivotE.High - pivotF.Low;
+                double segmentoED = pivotE.High - pivotD.Low;
+                
+                if (Math.Abs(segmentoED) < 0.0001) // Evitar división por cero
+                {
+                    if (MostrarDebug)
+                        Print($"[BARRA {CurrentBars[1]}] ❌ ERROR: Segmento E-D es cero en patrón bajista");
+                    return false;
+                }
+                
+                ratio = segmentoEF / segmentoED;
+                sizeEnTicks = segmentoEF / TickSize;
+            }
+
+            if (MostrarDebug)
+            {
+                Print($"╔══════════════════════════════════════════════════════════╗");
+                Print($"║              VERIFICACIÓN FILTROS PATRÓN                ║");
+                Print($"╠══════════════════════════════════════════════════════════╣");
+                Print($"║ Patrón: {(patronEsAlcista ? "ALCISTA" : "BAJISTA"),-8}                                   ║");
+                Print($"║                                                          ║");
+                
+                if (patronEsAlcista)
+                {
+                    Print($"║ HIGH PivoteD: {pivotD.High,10:F2}                            ║");
+                    Print($"║ LOW PivoteE:  {pivotE.Low,10:F2}                             ║");
+                    Print($"║ HIGH PivoteF: {pivotF.High,10:F2}                            ║");
+                    Print($"║                                                          ║");
+                    Print($"║ Segmento F-E: {pivotF.High:F2} - {pivotE.Low:F2} = {pivotF.High - pivotE.Low,8:F2}       ║");
+                    Print($"║ Segmento D-E: {pivotD.High:F2} - {pivotE.Low:F2} = {pivotD.High - pivotE.Low,8:F2}       ║");
+                }
+                else
+                {
+                    Print($"║ HIGH PivoteE: {pivotE.High,10:F2}                            ║");
+                    Print($"║ LOW PivoteD:  {pivotD.Low,10:F2}                             ║");
+                    Print($"║ LOW PivoteF:  {pivotF.Low,10:F2}                             ║");
+                    Print($"║                                                          ║");
+                    Print($"║ Segmento E-F: {pivotE.High:F2} - {pivotF.Low:F2} = {pivotE.High - pivotF.Low,8:F2}       ║");
+                    Print($"║ Segmento E-D: {pivotE.High:F2} - {pivotD.Low:F2} = {pivotE.High - pivotD.Low,8:F2}       ║");
+                }
+                
+                Print($"║                                                          ║");
+                Print($"║ RATIO CALCULADO: {ratio,6:F2}                               ║");
+                Print($"║ RATIO MÁXIMO:    {RatioPatron,6:F2}                               ║");
+                Print($"║ SIZE CALCULADO:  {sizeEnTicks,6:F0} ticks                       ║");
+                Print($"║ SIZE MÁXIMO:     {SizePatron,6:F0} ticks                       ║");
+                Print($"╚══════════════════════════════════════════════════════════╝");
+            }
+
+            // VERIFICAR FILTRO RATIO - Acepta valores entre 1.0 y RatioPatron
+            if (ratio < 1.0 || ratio > RatioPatron)
+            {
+                patronesRechazadosPorRatio++;
+                if (MostrarDebug)
+                {
+                    if (ratio < 1.0)
+                    {
+                        Print($"❌ PATRÓN RECHAZADO por FILTRO RATIO");
+                        Print($"   Ratio calculado: {ratio:F2} < 1.0 (mínimo aceptable)");
+                    }
+                    else
+                    {
+                        Print($"❌ PATRÓN RECHAZADO por FILTRO RATIO");
+                        Print($"   Ratio calculado: {ratio:F2} > Ratio máximo: {RatioPatron:F2}");
+                    }
+                }
+                return false;
+            }
+
+            // VERIFICAR FILTRO SIZE
+            if (sizeEnTicks > SizePatron)
+            {
+                patronesRechazadosPorSize++;
+                if (MostrarDebug)
+                {
+                    Print($"❌ PATRÓN RECHAZADO por FILTRO SIZE");
+                    Print($"   Size calculado: {sizeEnTicks:F0} ticks > Size máximo: {SizePatron} ticks");
+                }
+                return false;
+            }
+
+            if (MostrarDebug)
+            {
+                Print($"✅ PATRÓN APROBADO por ambos filtros (Ratio y Size)");
+                Print($"   Ratio: {ratio:F2} está en rango [1.0 - {RatioPatron:F2}] ✓");
+                Print($"   Size: {sizeEnTicks:F0} <= {SizePatron} ticks ✓");
+            }
+
+            return true;
+        }
+
+        #endregion
+
+        #region Filtro de Operaciones Inactivas
+
+        private bool VerificarFiltroOperacionesInactivas()
+        {
+            if (!UsarFiltroHorario)
+            {
+                if (MostrarDebug)
+                    Print("Filtro Horario DESACTIVADO - Operación permitida");
+                return true;
+            }
+
+            DateTime horaActual = Time[0];
+            DayOfWeek diaActual = horaActual.DayOfWeek;
+            TimeSpan horaDelDia = horaActual.TimeOfDay;
+            
+            // Verificar si el filtro aplica para el día actual
+            bool aplicaHoy = false;
+            switch (diaActual)
+            {
+                case DayOfWeek.Monday:
+                    aplicaHoy = AplicarLunes;
+                    break;
+                case DayOfWeek.Tuesday:
+                    aplicaHoy = AplicarMartes;
+                    break;
+                case DayOfWeek.Wednesday:
+                    aplicaHoy = AplicarMiercoles;
+                    break;
+                case DayOfWeek.Thursday:
+                    aplicaHoy = AplicarJueves;
+                    break;
+                case DayOfWeek.Friday:
+                    aplicaHoy = AplicarViernes;
+                    break;
+                case DayOfWeek.Saturday:
+                    aplicaHoy = AplicarSabado;
+                    break;
+                case DayOfWeek.Sunday:
+                    aplicaHoy = AplicarDomingo;
+                    break;
+            }
+
+            if (!aplicaHoy)
+            {
+                if (MostrarDebug)
+                    Print($"Filtro Horario NO aplica para {diaActual} - Operación permitida");
+                return true;
+            }
+
+            TimeSpan horaInicio = new TimeSpan(HoraInicioInactivo, MinutoInicioInactivo, 0);
+            TimeSpan horaFin = new TimeSpan(HoraFinInactivo, MinutoFinInactivo, 0);
+            
+            bool estaEnPeriodoInactivo = horaDelDia >= horaInicio && horaDelDia <= horaFin;
+
+            if (MostrarDebug)
+            {
+                Print($"╔══════════════════════════════════════════════════════════╗");
+                Print($"║         VERIFICACIÓN FILTRO OPERACIONES INACTIVAS       ║");
+                Print($"╠══════════════════════════════════════════════════════════╣");
+                Print($"║ Día actual: {diaActual,-12}                               ║");
+                Print($"║ Hora actual: {horaDelDia:hh\\:mm\\:ss}                           ║");
+                Print($"║ Aplica filtro hoy: {aplicaHoy,-5}                           ║");
+                Print($"║ Período inactivo: {horaInicio:hh\\:mm\\:ss} - {horaFin:hh\\:mm\\:ss}                  ║");
+                Print($"║ Está en período inactivo: {estaEnPeriodoInactivo,-5}               ║");
+                Print($"╚══════════════════════════════════════════════════════════╝");
+            }
+
+            if (estaEnPeriodoInactivo)
+            {
+                operacionesRechazadasPorHorario++;
+                if (MostrarDebug)
+                {
+                    Print($"❌ OPERACIÓN RECHAZADA por FILTRO HORARIO");
+                    Print($"   Hora actual: {horaDelDia:hh\\:mm\\:ss} está dentro del período inactivo {horaInicio:hh\\:mm\\:ss}-{horaFin:hh\\:mm\\:ss}");
+                }
+                return false;
+            }
+
+            if (MostrarDebug)
+            {
+                Print($"✅ OPERACIÓN APROBADA por filtro horario");
+                Print($"   Hora actual: {horaDelDia:hh\\:mm\\:ss} está fuera del período inactivo");
+            }
+
+            return true;
+        }
+
+        #endregion
+
+        #region Métodos Auxiliares
+
+        private bool VerificarFiltroZonasPremiumMultiframe(IndicadorPivotesZigZag.PivotPoint pivotE, bool patronEsAlcista)
+        {
+            if (!UsarFiltroZonasPremium)
+            {
+                if (MostrarDebug)
+                    Print("Filtro Zonas Premium DESACTIVADO - Patrón permitido");
+                return true;
+            }
+
+            if (indicadorZonasPremium == null)
+            {
+                if (MostrarDebug)
+                    Print("ERROR: IndicadorZonasPremium no inicializado");
+                return false;
+            }
+
+            try
+            {
+                if (indicadorZonasPremium.Count == 0)
+                {
+                    if (MostrarDebug)
+                        Print("WARNING: IndicadorZonasPremium aún no tiene datos");
+                    return false;
+                }
+
+                indicadorZonasPremium.Update();
+                double precioE = pivotE.Price;
+                var zonasActivas = indicadorZonasPremium.ZonasActivas;
+                
+                if (zonasActivas == null)
+                {
+                    if (MostrarDebug)
+                        Print("ERROR: ZonasActivas retornó null");
+                    return false;
+                }
+                
+                if (MostrarDebug)
+                {
+                    Print($"═══ VERIFICACIÓN FILTRO ZONAS PREMIUM ═══");
+                    Print($"PivoteE: {precioE:F2} - Patrón: {(patronEsAlcista ? "ALCISTA" : "BAJISTA")}");
+                    Print($"Zonas activas encontradas: {zonasActivas.Count}");
+                    
+                    for (int i = 0; i < zonasActivas.Count; i++)
+                    {
+                        var zona = zonasActivas[i];
+                        if (zona != null)
+                        {
+                            Print($"  Zona #{zona.Id}: {(zona.EsAlcista ? "ALCISTA" : "BAJISTA")} " +
+                                  $"[{zona.LimiteInferior:F2} - {zona.LimiteSuperior:F2}]");
+                        }
+                    }
+                }
+
+                if (zonasActivas.Count == 0)
+                {
+                    if (MostrarDebug)
+                        Print("❌ PATRÓN RECHAZADO: No hay zonas premium activas");
+                    return false;
+                }
+
+                var zonaCompatible = zonasActivas.Where(zona => zona != null).FirstOrDefault(zona => 
+                    zona.PrecioEnZona(precioE) && zona.EsAlcista == patronEsAlcista);
+
+                if (zonaCompatible == null)
+                {
+                    if (MostrarDebug)
+                    {
+                        bool estaEnAlgunaZona = zonasActivas.Where(z => z != null).Any(z => z.PrecioEnZona(precioE));
+                        if (estaEnAlgunaZona)
+                        {
+                            var zonaDiferente = zonasActivas.Where(z => z != null).First(z => z.PrecioEnZona(precioE));
+                            Print($"❌ PATRÓN RECHAZADO: PivoteE está en zona {(zonaDiferente.EsAlcista ? "ALCISTA" : "BAJISTA")} " +
+                                  $"pero patrón es {(patronEsAlcista ? "ALCISTA" : "BAJISTA")}");
+                        }
+                        else
+                        {
+                            Print($"❌ PATRÓN RECHAZADO: PivoteE NO está en ninguna zona premium activa");
+                        }
+                    }
+                    return false;
+                }
+
+                if (MostrarDebug)
+                {
+                    Print($"✅ PATRÓN ACEPTADO: PivoteE en Zona #{zonaCompatible.Id}");
+                    Print($"   Zona {(zonaCompatible.EsAlcista ? "ALCISTA" : "BAJISTA")} " +
+                          $"[{zonaCompatible.LimiteInferior:F2} - {zonaCompatible.LimiteSuperior:F2}]");
+                    Print($"   Patrón {(patronEsAlcista ? "ALCISTA" : "BAJISTA")} - TIPOS COINCIDEN");
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                if (MostrarDebug)
+                    Print($"ERROR en VerificarFiltroZonasPremiumMultiframe: {ex.Message}");
+                Print($"STACK TRACE: {ex.StackTrace}");
+                return false;
+            }
+        }
+
+        private void GuardarSnapshotPivotesMultiframe(bool esAlcista)
+        {
+            var pivotD = indicadorPivotes.GetPivotByLabel('D').Value;
+            var pivotE = indicadorPivotes.GetPivotByLabel('E').Value;
+            var pivotF = indicadorPivotes.GetPivotByLabel('F').Value;
+
+            double precioE = pivotE.Price;
+            double precioF = pivotF.Price;
+            
+            double distanciaEF = precioF - precioE;
+            double limiteProbable = precioE + (distanciaEF * (ZonaProbablePorcentaje / 100.0));
+
+            // ====== CALCULAR RATIO Y SIZE PARA EL SNAPSHOT ======
+            double ratio, sizeEnTicks;
+            
+            if (esAlcista)
+            {
+                double segmentoFE = pivotF.High - pivotE.Low;
+                double segmentoDE = pivotD.High - pivotE.Low;
+                ratio = segmentoFE / segmentoDE;
+                sizeEnTicks = segmentoFE / TickSize;
+            }
+            else
+            {
+                double segmentoEF = pivotE.High - pivotF.Low;
+                double segmentoED = pivotE.High - pivotD.Low;
+                ratio = segmentoEF / segmentoED;
+                sizeEnTicks = segmentoEF / TickSize;
+            }
+
+            snapshotPivotes = new PivotesSnapshot
+            {
+                PrecioD = pivotD.Price,
+                PrecioE = pivotE.Price,
+                PrecioF = pivotF.Price,
+                
+                IndiceD = pivotD.BarIndex,
+                IndiceE = pivotE.BarIndex,
+                IndiceF = pivotF.BarIndex,
+                
+                IsHighD = pivotD.IsHigh,
+                IsHighE = pivotE.IsHigh,
+                IsHighF = pivotF.IsHigh,
+                
+                HighD = pivotD.High,
+                LowD = pivotD.Low,
+                HighE = pivotE.High,
+                LowE = pivotE.Low,
+                HighF = pivotF.High,
+                LowF = pivotF.Low,
+                
+                EsAlcista = esAlcista,
+                PorcentajeZonaProbable = ZonaProbablePorcentaje,
+                
+                ZonaProbableMin = Math.Min(precioE, limiteProbable),
+                ZonaProbableMax = Math.Max(precioE, limiteProbable),
+                
+                // ====== GUARDAR VALORES DE FILTROS ======
+                RatioCalculado = ratio,
+                SizeCalculadoTicks = sizeEnTicks
+            };
+            
+            if (MostrarDebug)
+            {
+                Print($"═══ ZONA PROBABLE CALCULADA ═══");
+                Print($"PivoteE: {precioE:F2}");
+                Print($"PivoteF: {precioF:F2}");
+                Print($"Distancia E→F: {distanciaEF:F2}");
+                Print($"Porcentaje: {ZonaProbablePorcentaje}%");
+                Print($"Límite Probable: {limiteProbable:F2}");
+                Print($"Zona Final: [{snapshotPivotes.ZonaProbableMin:F2} - {snapshotPivotes.ZonaProbableMax:F2}]");
+                Print($"Ratio Final: {ratio:F2}");
+                Print($"Size Final: {sizeEnTicks:F0} ticks");
+                Print($"═══════════════════════════════");
+            }
+        }
+
+        #endregion
+
+        #region Búsqueda de Entrada
+        
+        private void BuscarEntradaMultiframe()
+        {
+            double precioActual = Closes[1][0];
+            double highActual = Highs[1][0];
+            double lowActual = Lows[1][0];
+            double closeActual = Closes[1][0];
+            double openActual = Opens[1][0];
+
+            if (MostrarDebug && CurrentBars[1] % 10 == 0)
+            {
+                Print($"[BARRA {CurrentBars[1]}] BUSCANDO ENTRADA:");
+                Print($"  Patrón: {(patronAlcistaDetectado ? "ALCISTA" : "BAJISTA")}");
+                Print($"  Precio: {precioActual:F2} (O:{openActual:F2} C:{closeActual:F2})");
+                Print($"  Zona Probable SNAPSHOT: [{snapshotPivotes.ZonaProbableMin:F2} - {snapshotPivotes.ZonaProbableMax:F2}]");
+                Print($"  PivoteE: {snapshotPivotes.PrecioE:F2}, PivoteF: {snapshotPivotes.PrecioF:F2}");
+                Print($"  Esperando Retroceso: {esperandoRetroceso}");
+                Print($"  Retroceso en Curso: {retrocesoenCurso}");
+                Print($"  Velas Reversión Requeridas: {VelasReversionRequeridas}");
+                Print($"  Velas Reversión Válidas: {contadorVelasReversionValidas}");
+            }
+
+            if (patronAlcistaDetectado && lowActual <= snapshotPivotes.LowE)
+            {
+                Print($"╔══════════════════════════════════════════════════════╗");
+                Print($"║  ANULACIÓN ALCISTA: Retroceso alcanzó PivoteE       ║");
+                Print($"╠══════════════════════════════════════════════════════╣");
+                Print($"║ Precio LOW actual: {lowActual,10:F2}                    ║");
+                Print($"║ LOW PivoteE: {snapshotPivotes.LowE,10:F2}                         ║");
+                Print($"║ No hubo vela de reversión válida                    ║");
+                Print($"╚══════════════════════════════════════════════════════╝");
+                ResetEstadoEstrategiaFiltros();
+                return;
+            }
+
+            if (patronBajistaDetectado && highActual >= snapshotPivotes.HighE)
+            {
+                Print($"╔══════════════════════════════════════════════════════╗");
+                Print($"║  ANULACIÓN BAJISTA: Retroceso alcanzó PivoteE       ║");
+                Print($"╠══════════════════════════════════════════════════════╣");
+                Print($"║ Precio HIGH actual: {highActual,10:F2}                   ║");
+                Print($"║ HIGH PivoteE: {snapshotPivotes.HighE,10:F2}                        ║");
+                Print($"║ No hubo vela de reversión válida                    ║");
+                Print($"╚══════════════════════════════════════════════════════╝");
+                ResetEstadoEstrategiaFiltros();
+                return;
+            }
+
+            if (patronAlcistaDetectado && highActual > snapshotPivotes.HighF)
+            {
+                Print($"╔══════════════════════════════════════════════════════╗");
+                Print($"║  ANULACIÓN ALCISTA: Precio sobrepasó PivoteF        ║");
+                Print($"╠══════════════════════════════════════════════════════╣");
+                Print($"║ Precio HIGH actual: {highActual,10:F2}                   ║");
+                Print($"║ HIGH PivoteF: {snapshotPivotes.HighF,10:F2}                        ║");
+                Print($"║ El precio superó el punto de inicio del patrón      ║");
+                Print($"╚══════════════════════════════════════════════════════╝");
+                ResetEstadoEstrategiaFiltros();
+                return;
+            }
+
+            if (patronBajistaDetectado && lowActual < snapshotPivotes.LowF)
+            {
+                Print($"╔══════════════════════════════════════════════════════╗");
+                Print($"║  ANULACIÓN BAJISTA: Precio sobrepasó PivoteF        ║");
+                Print($"╠══════════════════════════════════════════════════════╣");
+                Print($"║ Precio LOW actual: {lowActual,10:F2}                    ║");
+                Print($"║ LOW PivoteF: {snapshotPivotes.LowF,10:F2}                         ║");
+                Print($"║ El precio superó el punto de inicio del patrón      ║");
+                Print($"╚══════════════════════════════════════════════════════╝");
+                ResetEstadoEstrategiaFiltros();
+                return;
+            }
+
+            if (esperandoRetroceso && !retrocesoenCurso)
+            {
+                bool iniciaRetrocesoAlcista = patronAlcistaDetectado && closeActual < openActual;
+                bool iniciaRetrocesoBajista = patronBajistaDetectado && closeActual > openActual;
+
+                if (iniciaRetrocesoAlcista || iniciaRetrocesoBajista)
+                {
+                    bool enZonaProbable = precioActual >= snapshotPivotes.ZonaProbableMin && 
+                                        precioActual <= snapshotPivotes.ZonaProbableMax;
+
+                    if (MostrarDebug)
+                    {
+                        Print($"═══ VERIFICACIÓN ZONA PROBABLE ═══");
+                        Print($"Precio actual: {precioActual:F2}");
+                        Print($"Zona Min SNAPSHOT: {snapshotPivotes.ZonaProbableMin:F2}");
+                        Print($"Zona Max SNAPSHOT: {snapshotPivotes.ZonaProbableMax:F2}");
+                        Print($"En Zona Probable: {enZonaProbable}");
+                        Print($"═════════════════════════════════");
+                    }
+
+                    if (!enZonaProbable)
+                    {
+                        if (MostrarDebug)
+                            Print($"[BARRA {CurrentBars[1]}] Retroceso inicia fuera de zona probable: {precioActual:F2}");
+                        return;
+                    }
+
+                    retrocesoenCurso = true;
+                    esperandoRetroceso = false;
+                    contadorVelasRetroceso = 1;
+                    indicesRetroceso.Clear();
+                    indicesRetroceso.Add(CurrentBars[1]);
+                    precioEntradaRetroceso = precioActual;
+                    extremoRetroceso = patronAlcistaDetectado ? lowActual : highActual;
+
+                    // ====== RESETEAR CONTADOR DE VELAS DE REVERSIÓN ======
+                    velasReversionConsecutivas.Clear();
+                    contadorVelasReversionValidas = 0;
+
+                    Print($"╔══════════════════════════════════════════════════════╗");
+                    Print($"║  INICIO RETROCESO {(patronAlcistaDetectado ? "ALCISTA" : "BAJISTA"),-32}    ║");
+                    Print($"╠══════════════════════════════════════════════════════╣");
+                    Print($"║ Barra: {CurrentBars[1],-6}                                       ║");
+                    Print($"║ Precio: {precioActual,10:F2}                                ║");
+                    Print($"║ Extremo inicial: {extremoRetroceso,10:F2}                      ║");
+                    Print($"║ Zona Probable: [{snapshotPivotes.ZonaProbableMin:F2} - {snapshotPivotes.ZonaProbableMax:F2}]              ║");
+                    Print($"║ Velas Reversión Requeridas: {VelasReversionRequeridas,-2}                 ║");
+                    Print($"╚══════════════════════════════════════════════════════╝");
+                }
+                return;
+            }
+
+            if (retrocesoenCurso)
+            {
+                bool continuaRetrocesoAlcista = patronAlcistaDetectado && closeActual < openActual;
+                bool continuaRetrocesoBajista = patronBajistaDetectado && closeActual > openActual;
+
+                if (continuaRetrocesoAlcista || continuaRetrocesoBajista)
+                {
+                    contadorVelasRetroceso++;
+                    indicesRetroceso.Add(CurrentBars[1]);
+                    
+                    if (patronAlcistaDetectado)
+                        extremoRetroceso = Math.Min(extremoRetroceso, lowActual);
+                    else
+                        extremoRetroceso = Math.Max(extremoRetroceso, highActual);
+
+                    // ====== RESETEAR CONTADOR DE VELAS DE REVERSIÓN SI CONTINÚA RETROCESO ======
+                    velasReversionConsecutivas.Clear();
+                    contadorVelasReversionValidas = 0;
+
+                    if (MostrarDebug && CurrentBars[1] % 5 == 0)
+                        Print($"[BARRA {CurrentBars[1]}] >>> Retroceso continúa, vela #{contadorVelasRetroceso}, extremo: {extremoRetroceso:F2}");
+                    return;
+                }
+
+                // ====== NUEVA LÓGICA PARA MÚLTIPLES VELAS DE REVERSIÓN ======
+                bool esVelaReversionAlcista = patronAlcistaDetectado && closeActual > openActual;
+                bool esVelaReversionBajista = patronBajistaDetectado && closeActual < openActual;
+                bool esVelaReversion = esVelaReversionAlcista || esVelaReversionBajista;
+
+                if (esVelaReversion)
+                {
+                    bool enZonaProbable = closeActual >= snapshotPivotes.ZonaProbableMin && 
+                                        closeActual <= snapshotPivotes.ZonaProbableMax;
+
+                    if (!enZonaProbable)
+                    {
+                        Print($"⚠️ VELA DE REVERSIÓN FUERA DE ZONA PROBABLE - Patrón continúa pero sin entrada");
+                        Print($"   Esperando que el precio regrese a zona probable o anulación por sobrepasar F");
+                        
+                        esperandoRetroceso = true;
+                        retrocesoenCurso = false;
+                        contadorVelasRetroceso = 0;
+                        indicesRetroceso.Clear();
+                        velasReversionConsecutivas.Clear();
+                        contadorVelasReversionValidas = 0;
+                        return;
+                    }
+
+                    // Agregar esta vela de reversión a la lista
+                    velasReversionConsecutivas.Add(true);
+                    contadorVelasReversionValidas++;
+
+                    Print($"╔══════════════════════════════════════════════════════╗");
+                    Print($"║  VELA DE REVERSIÓN #{contadorVelasReversionValidas} DETECTADA                ║");
+                    Print($"╠══════════════════════════════════════════════════════╣");
+                    Print($"║ Barra: {CurrentBars[1],-6}                                       ║");
+                    Print($"║ Precio CLOSE: {closeActual,10:F2}                          ║");
+                    Print($"║ Velas de retroceso: {contadorVelasRetroceso,-3}                         ║");
+                    Print($"║ Extremo retroceso: {extremoRetroceso,10:F2}                    ║");
+                    Print($"║ En Zona Probable: SÍ ✓                              ║");
+                    Print($"║ Velas Reversión: {contadorVelasReversionValidas}/{VelasReversionRequeridas}                           ║");
+                    Print($"╚══════════════════════════════════════════════════════╝");
+
+                    // Verificar si se alcanzó el número requerido de velas de reversión
+                    if (contadorVelasReversionValidas >= VelasReversionRequeridas)
+                    {
+                        // ====== APLICAR FILTRO DE OPERACIONES INACTIVAS ANTES DE LA ENTRADA ======
+                        if (!VerificarFiltroOperacionesInactivas())
+                        {
+                            Print($"❌ OPERACIÓN CANCELADA por filtro de operaciones inactivas");
+                            Print($"   Se detectaron {VelasReversionRequeridas} velas de reversión válidas pero el horario está restringido");
+                            
+                            esperandoRetroceso = true;
+                            retrocesoenCurso = false;
+                            contadorVelasRetroceso = 0;
+                            indicesRetroceso.Clear();
+                            velasReversionConsecutivas.Clear();
+                            contadorVelasReversionValidas = 0;
+                            return;
+                        }
+
+                        Print($"✅ REVERSIÓN VÁLIDA CON {VelasReversionRequeridas} VELAS CONSECUTIVAS - EJECUTANDO ENTRADA");
+                        
+                        patronesConReversionValida++;
+                        IniciarTrackingRecorridoFiltros(closeActual);
+                        EjecutarEntradaConComisionesFiltros(closeActual, extremoRetroceso);
+                    }
+                    else
+                    {
+                        Print($"⏳ Esperando {VelasReversionRequeridas - contadorVelasReversionValidas} velas de reversión más para confirmar entrada");
+                    }
+                }
+                else
+                {
+                    // Si la vela actual no es de reversión, resetear el contador
+                    if (contadorVelasReversionValidas > 0)
+                    {
+                        Print($"🔄 REINICIO CONTADOR: La vela actual no es de reversión");
+                        Print($"   Se perdieron {contadorVelasReversionValidas} velas de reversión acumuladas");
+                        velasReversionConsecutivas.Clear();
+                        contadorVelasReversionValidas = 0;
+                    }
+                }
+            }
+        }
+        
+        #endregion
+
+        #region Ejecución de Entrada
+
+        private void EjecutarEntradaConComisionesFiltros(double precioEntrada, double extremoRetroceso)
+        {
+            double stopLoss = CalcularStopLossMultiframeFiltros(extremoRetroceso);
+            double distanciaSL = Math.Abs(precioEntrada - stopLoss);
+            int ticksSL = (int)Math.Round(distanciaSL / TickSize);
+
+            int contratos = CalcularNumeroContratosMultiframeFiltros(ticksSL);
+
+            if (contratos <= 0)
+            {
+                Print($"ERROR: Número de contratos calculado inválido: {contratos}");
+                ResetEstadoEstrategiaFiltros();
+                return;
+            }
+
+            // ====== CÁLCULO DEL TAKE PROFIT SEGÚN MODO SELECCIONADO ======
+            int ticksTP;
+            double perdidaReal, gananciaReal, relacionRB_Real;
+            
+            if (IncluirComisionesEnCalculos)
+            {
+                // MODO CON COMISIONES - R:B exacta compensando comisiones
+                double comisionTotal = contratos * ComisionPorContrato * 2;
+                double gananciaNeta_Deseada = RiesgoDolares * RelacionRiesgoBeneficio;
+                double gananciaBruta_Necesaria = gananciaNeta_Deseada + comisionTotal;
+                
+                int ticksTP_Corregidos = (int)Math.Ceiling(gananciaBruta_Necesaria / (contratos * PrecioDelTick));
+                int ticksTP_Simple = ticksSL * RelacionRiesgoBeneficio;
+                ticksTP = Math.Max(ticksTP_Simple, ticksTP_Corregidos);
+                
+                perdidaReal = (ticksSL * contratos * PrecioDelTick) + comisionTotal;
+                double gananciaBruta = ticksTP * contratos * PrecioDelTick;
+                gananciaReal = gananciaBruta - comisionTotal;
+                relacionRB_Real = gananciaReal / perdidaReal;
+            }
+            else
+            {
+                // MODO SIN COMISIONES - R:B simple
+                ticksTP = ticksSL * RelacionRiesgoBeneficio;
+                perdidaReal = ticksSL * contratos * PrecioDelTick;
+                gananciaReal = ticksTP * contratos * PrecioDelTick;
+                relacionRB_Real = gananciaReal / perdidaReal;
+            }
+            
+            double distanciaTP = ticksTP * TickSize;
+
+            string tipoOperacion = patronAlcistaDetectado ? "LONG" : "SHORT";
+            string modoComisiones = IncluirComisionesEnCalculos ? "CON COMISIONES" : "SIN COMISIONES";
+            
+            string logOperacion = $"╔═══════════════════════════════════════════════════════╗\n" +
+                                 $"║          ORDEN ENVIADA - {tipoOperacion,-5} [MEJORADA]          ║\n" +
+                                 $"║          MODO: {modoComisiones,-15}                  ║\n" +
+                                 $"╠═══════════════════════════════════════════════════════╣\n" +
+                                 $"║ Hora: {Time[0]:yyyy-MM-dd HH:mm:ss}                      ║\n" +
+                                 $"║ Contratos: {contratos,-3}                                  ║\n" +
+                                 $"║ Precio Entrada: {precioEntrada,10:F2}                   ║\n" +
+                                 $"║ Stop Loss: {stopLoss,10:F2} ({ticksSL,3} ticks)       ║\n" +
+                                 $"║ Take Profit: {(patronAlcistaDetectado ? precioEntrada + distanciaTP : precioEntrada - distanciaTP),10:F2} ({ticksTP,3} ticks)     ║\n" +
+                                 $"║ Velas Reversión: {VelasReversionRequeridas} (validadas ✓)             ║\n" +
+                                 $"║ Riesgo: ${RiesgoDolares,-6} | R:B objetivo: 1:{RelacionRiesgoBeneficio}         ║\n" +
+                                 $"║ R:B real: 1:{relacionRB_Real:F2}                           ║\n" +
+                                 $"╠═══════════════════════════════════════════════════════╣\n" +
+                                 $"║ GESTIÓN DE RIESGO:                                    ║\n" +
+                                 $"║ Pérdida real: ${perdidaReal:F2}                           ║\n" +
+                                 $"║ Ganancia real: ${gananciaReal:F2}                         ║\n";
+
+            if (IncluirComisionesEnCalculos)
+            {
+                double comisionTotal = contratos * ComisionPorContrato * 2;
+                logOperacion += $"║ Comisiones: ${comisionTotal:F2}                           ║\n";
+            }
+            else
+            {
+                logOperacion += $"║ Comisiones: NO INCLUIDAS                              ║\n";
+            }
+
+            logOperacion += $"╠═══════════════════════════════════════════════════════╣\n" +
+                           $"║ PIVOTES EN MOMENTO DE ENTRADA:                        ║\n" +
+                           $"║ {snapshotPivotes.ToString().Replace("\n", "\n║ ")}                       ║\n" +
+                           $"╚═══════════════════════════════════════════════════════╝";
+
+            Print(logOperacion);
+            ordenesLog.Add(logOperacion);
+
+            if (MostrarDebug)
+            {
+                Print($"════════════════════════════════════════════════════");
+                Print($"    CÁLCULO TAKE PROFIT - MODO {modoComisiones}");
+                Print($"════════════════════════════════════════════════════");
+                Print($"CONFIGURACIÓN:");
+                Print($"  Riesgo: ${RiesgoDolares}");
+                Print($"  Relación R:B objetivo: 1:{RelacionRiesgoBeneficio}");
+                Print($"  Contratos: {contratos}");
+                Print($"  Modo comisiones: {(IncluirComisionesEnCalculos ? "INCLUIDAS" : "EXCLUIDAS")}");
+                Print($"  Velas Reversión Utilizadas: {VelasReversionRequeridas}");
+                Print($"");
+                
+                if (IncluirComisionesEnCalculos)
+                {
+                    double comisionTotal = contratos * ComisionPorContrato * 2;
+                    double gananciaNeta_Deseada = RiesgoDolares * RelacionRiesgoBeneficio;
+                    double gananciaBruta_Necesaria = gananciaNeta_Deseada + comisionTotal;
+                    int ticksTP_Simple = ticksSL * RelacionRiesgoBeneficio;
+                    int ticksTP_Corregidos = (int)Math.Ceiling(gananciaBruta_Necesaria / (contratos * PrecioDelTick));
+                    
+                    Print($"CÁLCULO CON COMISIONES:");
+                    Print($"  Comisiones totales: ${comisionTotal:F2}");
+                    Print($"  Ganancia neta deseada: ${gananciaNeta_Deseada:F2}");
+                    Print($"  Ganancia bruta necesaria: ${gananciaBruta_Necesaria:F2}");
+                    Print($"  Ticks TP simples: {ticksTP_Simple}");
+                    Print($"  Ticks TP corregidos: {ticksTP_Corregidos}");
+                    Print($"  Ticks TP finales: {ticksTP} (mayor de ambos)");
+                }
+                else
+                {
+                    Print($"CÁLCULO SIN COMISIONES:");
+                    Print($"  Ticks TP = SL × R:B = {ticksSL} × {RelacionRiesgoBeneficio} = {ticksTP}");
+                }
+                
+                Print($"");
+                Print($"RESULTADO FINAL:");
+                Print($"  Pérdida real: ${perdidaReal:F2}");
+                Print($"  Ganancia real: ${gananciaReal:F2}");
+                Print($"  Relación R:B real: 1:{relacionRB_Real:F2}");
+                Print($"════════════════════════════════════════════════════");
+            }
+
+            if (patronAlcistaDetectado)
+            {
+                EnterLong(1, contratos, "EntryLongFiltrosMejorada");
+                SetStopLoss("EntryLongFiltrosMejorada", CalculationMode.Price, stopLoss, false);
+                SetProfitTarget("EntryLongFiltrosMejorada", CalculationMode.Ticks, ticksTP);
+                
+                if (MostrarFlechas)
+                    Draw.ArrowUp(this, "EntryArrowFiltrosMejorada" + CurrentBars[1], true, 0, 
+                        Lows[1][0] - 5 * TickSize, Brushes.Lime);
+            }
+            else
+            {
+                EnterShort(1, contratos, "EntryShortFiltrosMejorada");
+                SetStopLoss("EntryShortFiltrosMejorada", CalculationMode.Price, stopLoss, false);
+                SetProfitTarget("EntryShortFiltrosMejorada", CalculationMode.Ticks, ticksTP);
+                
+                if (MostrarFlechas)
+                    Draw.ArrowDown(this, "EntryArrowFiltrosMejorada" + CurrentBars[1], true, 0, 
+                        Highs[1][0] + 5 * TickSize, Brushes.Red);
+            }
+
+            Print("⏳ Orden enviada. SNAPSHOT se mantiene activo hasta cierre de orden.");
+        }
+
+        private double CalcularStopLossMultiframeFiltros(double extremoRetroceso)
+        {
+            if (TipoStopLoss == 1)
+            {
+                double deslizamiento = TicksDeslizamientoSL * TickSize;
+                return patronAlcistaDetectado ? 
+                    extremoRetroceso - deslizamiento : 
+                    extremoRetroceso + deslizamiento;
+            }
+            else
+            {
+                return patronAlcistaDetectado ? snapshotPivotes.LowE : snapshotPivotes.HighE;
+            }
+        }
+
+        private int CalcularNumeroContratosMultiframeFiltros(int ticksSL)
+        {
+            double contratosDecimal;
+            int contratos;
+            
+            if (IncluirComisionesEnCalculos)
+            {
+                // MODO CON COMISIONES
+                double comisionTotal = ComisionPorContrato * 2;
+                double costoSLPorContrato = ticksSL * PrecioDelTick;
+                double costoTotalPorContrato = costoSLPorContrato + comisionTotal;
+                
+                if (costoTotalPorContrato <= 0)
+                {
+                    Print($"ERROR: Costo total por contrato es 0 o negativo");
+                    return 0;
+                }
+
+                contratosDecimal = RiesgoDolares / costoTotalPorContrato;
+                contratos = (int)Math.Floor(contratosDecimal);
+            }
+            else
+            {
+                // MODO SIN COMISIONES
+                double costoSLPorContrato = ticksSL * PrecioDelTick;
+                
+                if (costoSLPorContrato <= 0)
+                {
+                    Print($"ERROR: Costo SL por contrato es 0 o negativo");
+                    return 0;
+                }
+
+                contratosDecimal = RiesgoDolares / costoSLPorContrato;
+                contratos = (int)Math.Floor(contratosDecimal);
+            }
+            
+            if (contratos < 1)
+            {
+                Print($"ADVERTENCIA: Riesgo insuficiente para 1 contrato. Aumenta el riesgo o reduce el stop loss.");
+                return 1;
+            }
+
+            if (MostrarDebug)
+            {
+                Print($"════════════════════════════════════════════════════");
+                Print($"  CÁLCULO GESTIÓN DE RIESGO {(IncluirComisionesEnCalculos ? "CON" : "SIN")} COMISIONES");
+                Print($"════════════════════════════════════════════════════");
+                Print($"PARÁMETROS:");
+                Print($"  Riesgo objetivo: ${RiesgoDolares}");
+                Print($"  Stop Loss: {ticksSL} ticks");
+                Print($"  Precio del tick: ${PrecioDelTick}");
+                Print($"  Modo comisiones: {(IncluirComisionesEnCalculos ? "INCLUIDAS" : "EXCLUIDAS")}");
+                if (IncluirComisionesEnCalculos)
+                    Print($"  Comisión por contrato: ${ComisionPorContrato}");
+                Print($"");
+                
+                if (IncluirComisionesEnCalculos)
+                {
+                    double comisionTotal = ComisionPorContrato * 2;
+                    double costoSLPorContrato = ticksSL * PrecioDelTick;
+                    double costoTotalPorContrato = costoSLPorContrato + comisionTotal;
+                    
+                    Print($"CÁLCULO CON COMISIONES:");
+                    Print($"  Comisión total (entrada+salida): ${comisionTotal}");
+                    Print($"  Costo SL por contrato: ${costoSLPorContrato:F2}");
+                    Print($"  Costo total por contrato: ${costoTotalPorContrato:F2}");
+                    Print($"  Contratos: {RiesgoDolares} ÷ {costoTotalPorContrato:F2} = {contratosDecimal:F3} → {contratos}");
+                    Print($"");
+                    
+                    double perdidaRealSL = contratos * costoSLPorContrato;
+                    double perdidaRealComisiones = contratos * comisionTotal;
+                    double perdidaTotal = perdidaRealSL + perdidaRealComisiones;
+                    
+                    Print($"VERIFICACIÓN:");
+                    Print($"  Pérdida por movimiento: ${perdidaRealSL:F2}");
+                    Print($"  Pérdida por comisiones: ${perdidaRealComisiones:F2}");
+                    Print($"  PÉRDIDA TOTAL: ${perdidaTotal:F2}");
+                    Print($"  Diferencia vs riesgo: ${RiesgoDolares - perdidaTotal:F2}");
+                }
+                else
+                {
+                    double costoSLPorContrato = ticksSL * PrecioDelTick;
+                    
+                    Print($"CÁLCULO SIN COMISIONES:");
+                    Print($"  Costo SL por contrato: ${costoSLPorContrato:F2}");
+                    Print($"  Contratos: {RiesgoDolares} ÷ {costoSLPorContrato:F2} = {contratosDecimal:F3} → {contratos}");
+                    Print($"");
+                    
+                    double perdidaReal = contratos * costoSLPorContrato;
+                    
+                    Print($"VERIFICACIÓN:");
+                    Print($"  PÉRDIDA TOTAL: ${perdidaReal:F2} (sin comisiones)");
+                    Print($"  Diferencia vs riesgo: ${RiesgoDolares - perdidaReal:F2}");
+                }
+                
+                Print($"════════════════════════════════════════════════════");
+            }
+
+            return contratos;
+        }
+
+        #endregion
+
+        #region Eventos de Órdenes
+
+        protected override void OnOrderUpdate(Order order, double limitPrice, double stopPrice, 
+            int quantity, int filled, double averageFillPrice, OrderState orderState, 
+            DateTime time, ErrorCode error, string comment)
+        {
+            string logOrden = $"[{Time[0]:HH:mm:ss}] ORDEN UPDATE: {order.Name} | Estado: {orderState} | " +
+                             $"Cantidad: {quantity} | Ejecutado: {filled} | Precio: {averageFillPrice:F2}";
+
+            if (error != ErrorCode.NoError)
+            {
+                logOrden += $" | ERROR: {error} - {comment}";
+                Print($">>> {logOrden}");
+            }
+            else if (orderState == OrderState.Filled)
+            {
+                Print($">>> {logOrden}");
+                
+                if (order.Name.Contains("Entry"))
+                {
+                    Print($">>> ENTRADA EJECUTADA: {order.Name} - {filled} contratos @ {averageFillPrice:F2}");
+                }
+                
+                if (order.Name.Contains("Stop") || order.Name.Contains("Profit"))
+                {
+                    Print($"╔═══════════════════════════════════════════════════════╗");
+                    Print($"║          ORDEN CERRADA - {order.Name,-30}    ║");
+                    Print($"╠═══════════════════════════════════════════════════════╣");
+                    Print($"║ Tipo: {order.OrderAction,-10} | Cantidad: {filled,-3}                 ║");
+                    Print($"║ Precio: {averageFillPrice,10:F2}                              ║");
+                    Print($"║                                                       ║");
+                    Print($"║ ✓ ORDEN COMPLETAMENTE CERRADA                        ║");
+                    Print($"║ ✓ Reseteando estrategia para buscar nuevo patrón     ║");
+                    Print($"╚═══════════════════════════════════════════════════════╝");
+                    
+                    ResetEstadoEstrategiaFiltros();
+                }
+            }
+            else if (MostrarDebug)
+            {
+                Print($">>> {logOrden}");
+            }
+
+            ordenesLog.Add(logOrden);
+        }
+
+        protected override void OnExecutionUpdate(Execution execution, string executionId, 
+            double price, int quantity, MarketPosition marketPosition, string orderId, DateTime time)
+        {
+            if (execution.Order.Name.Contains("Entry"))
+            {
+                Print($"╔═══════════════════════════════════════════════════════╗");
+                Print($"║          EJECUCIÓN CONFIRMADA - ENTRADA              ║");
+                Print($"╠═══════════════════════════════════════════════════════╣");
+                Print($"║ Orden: {execution.Order.Name,-20}                    ║");
+                Print($"║ Tipo: {execution.Order.OrderAction,-10} | Cantidad: {quantity,-3}       ║");
+                Print($"║ Precio: {price,10:F2}                              ║");
+                Print($"║ Hora: {time:yyyy-MM-dd HH:mm:ss}                      ║");
+                Print($"║                                                       ║");
+                Print($"║ ⏳ Esperando cierre de orden (SL o TP)               ║");
+                Print($"║ ⏳ SNAPSHOT se mantiene activo                        ║");
+                Print($"╚═══════════════════════════════════════════════════════╝");
+            }
+            
+            if (execution.Order.Name.Contains("Stop") || execution.Order.Name.Contains("Profit"))
+            {
+                Print($"╔═══════════════════════════════════════════════════════╗");
+                Print($"║          EJECUCIÓN CONFIRMADA - SALIDA               ║");
+                Print($"╠═══════════════════════════════════════════════════════╣");
+                Print($"║ Orden: {execution.Order.Name,-20}                    ║");
+                Print($"║ Tipo: {execution.Order.OrderAction,-10} | Cantidad: {quantity,-3}       ║");
+                Print($"║ Precio: {price,10:F2}                              ║");
+                Print($"║ Hora: {time:yyyy-MM-dd HH:mm:ss}                      ║");
+                Print($"╚═══════════════════════════════════════════════════════╝");
+            }
+        }
+
+        #endregion
+
+        #region Tracking de Recorridos
+
+        private void IniciarTrackingRecorridoFiltros(double precioInicio)
+        {
+            trackingRecorrido = true;
+            precioInicioTracking = precioInicio;
+            recorridoMaximoTicks = 0;
+            patronActualId++;
+            
+            if (MostrarDebug)
+            {
+                Print($"╔════════════════════════════════════════════════════╗");
+                Print($"║  INICIO TRACKING RECORRIDO #{patronActualId,-3} [MEJORADA]      ║");
+                Print($"╠════════════════════════════════════════════════════╣");
+                Print($"║ Precio Inicio: {precioInicio,10:F2}                      ║");
+                Print($"║ Tipo Patrón: {(patronAlcistaDetectado ? "ALCISTA " : "BAJISTA"),-8}                     ║");
+                Print($"║ Velas Reversión: {VelasReversionRequeridas,-2}                        ║");
+                Print($"╚════════════════════════════════════════════════════╝");
+            }
+        }
+
+        private void ActualizarRecorridoMaximo()
+        {
+            double precioActual = Closes[1][0];
+            double recorridoActual = 0;
+            
+            if (patronAlcistaDetectado)
+            {
+                recorridoActual = precioActual - precioInicioTracking;
+            }
+            else
+            {
+                recorridoActual = precioInicioTracking - precioActual;
+            }
+            
+            double recorridoTicks = recorridoActual / TickSize;
+            
+            if (recorridoTicks > recorridoMaximoTicks)
+            {
+                recorridoMaximoTicks = recorridoTicks;
+                
+                if (MostrarDebug && CurrentBars[1] % 10 == 0)
+                {
+                    Print($"[Tracking #{patronActualId}] Nuevo máximo: {recorridoMaximoTicks:F0} ticks");
+                }
+            }
+        }
+
+        private void FinalizarTrackingRecorridoFiltros(string razon)
+        {
+            if (!trackingRecorrido) return;
+            
+            string intervalo = ClasificarRecorrido((int)Math.Round(recorridoMaximoTicks));
+            distribucionRecorridos[intervalo]++;
+            
+            Print($"╔════════════════════════════════════════════════════╗");
+            Print($"║  FIN TRACKING RECORRIDO #{patronActualId,-3} [MEJORADA]        ║");
+            Print($"╠════════════════════════════════════════════════════╣");
+            Print($"║ Razón: {razon,-43} ║");
+            Print($"║ Recorrido Máximo: {recorridoMaximoTicks,6:F0} ticks                  ║");
+            Print($"║ Intervalo: {intervalo,-10}                            ║");
+            Print($"║ Velas Reversión: {VelasReversionRequeridas,-2}                        ║");
+            Print($"╚════════════════════════════════════════════════════╝");
+            
+            trackingRecorrido = false;
+            precioInicioTracking = 0;
+            recorridoMaximoTicks = 0;
+        }
+
+        private string ClasificarRecorrido(int ticks)
+        {
+            if (ticks >= 1 && ticks <= 16) return "[1-16]";
+            if (ticks >= 17 && ticks <= 32) return "[17-32]";
+            if (ticks >= 33 && ticks <= 48) return "[33-48]";
+            if (ticks >= 49 && ticks <= 64) return "[49-64]";
+            if (ticks >= 65 && ticks <= 80) return "[65-80]";
+            if (ticks >= 81 && ticks <= 96) return "[81-96]";
+            if (ticks >= 97 && ticks <= 112) return "[97-112]";
+            if (ticks >= 113 && ticks <= 128) return "[113-128]";
+            if (ticks >= 129 && ticks <= 144) return "[129-144]";
+            if (ticks >= 145 && ticks <= 160) return "[145-160]";
+            return "[160+]";
+        }
+
+        #endregion
+
+        #region Utilidades y Reportes
+
+        private void ResetEstadoEstrategiaFiltros()
+        {
+            if (trackingRecorrido)
+            {
+                FinalizarTrackingRecorridoFiltros("Patrón anulado o completado");
+            }
+            
+            patronAlcistaDetectado = false;
+            patronBajistaDetectado = false;
+            esperandoRetroceso = false;
+            retrocesoenCurso = false;
+            contadorVelasRetroceso = 0;
+            indicesRetroceso.Clear();
+            precioEntradaRetroceso = 0;
+            extremoRetroceso = 0;
+            
+            // ====== RESETEAR VARIABLES DE VELAS DE REVERSIÓN ======
+            velasReversionConsecutivas.Clear();
+            contadorVelasReversionValidas = 0;
+            
+            if (MostrarDebug)
+                Print(">>> Estado de estrategia MEJORADA reiniciado - Buscando nuevo patrón");
+        }
+
+        private void GenerarReporteEstadisticas()
+        {
+            if ((Time[0] - ultimoReporteEstadisticas).TotalMinutes >= 15)
+            {
+                int totalPatrones = patronesAlcistasDetectados + patronesBajistasDetectados;
+                double tasaReversion = totalPatrones > 0 ? (patronesConReversionValida * 100.0 / totalPatrones) : 0;
+                
+                int totalRecorridos = distribucionRecorridos.Values.Sum();
+                int recorridosMayores80 = distribucionRecorridos.Where(kvp => 
+                    kvp.Key.StartsWith("[81") || kvp.Key.StartsWith("[97") || 
+                    kvp.Key.StartsWith("[113") || kvp.Key.StartsWith("[129") || 
+                    kvp.Key.StartsWith("[145") || kvp.Key.StartsWith("[160")
+                ).Sum(kvp => kvp.Value);
+                
+                double porcentajeMayores80 = totalRecorridos > 0 ? (recorridosMayores80 * 100.0 / totalRecorridos) : 0;
+                
+                double sumaRecorridos = 0;
+                int contadorRecorridos = 0;
+                foreach (var kvp in distribucionRecorridos)
+                {
+                    if (kvp.Value > 0 && kvp.Key != "[160+]")
+                    {
+                        string intervalo = kvp.Key.Trim('[', ']');
+                        string[] partes = intervalo.Split('-');
+                        if (partes.Length == 2)
+                        {
+                            int min = int.Parse(partes[0]);
+                            int max = int.Parse(partes[1]);
+                            double puntoMedio = (min + max) / 2.0;
+                            sumaRecorridos += puntoMedio * kvp.Value;
+                            contadorRecorridos += kvp.Value;
+                        }
+                    }
+                    else if (kvp.Value > 0 && kvp.Key == "[160+]")
+                    {
+                        sumaRecorridos += 180 * kvp.Value;
+                        contadorRecorridos += kvp.Value;
+                    }
+                }
+                
+                double recorridoPromedio = contadorRecorridos > 0 ? sumaRecorridos / contadorRecorridos : 0;
+                
+                Print("╔══════════════════════════════════════════════════════════════╗");
+                Print("║          REPORTE ESTADÍSTICAS MULTIFRAME (15 min)           ║");
+                Print("║         CON FILTROS Y MÚLTIPLES VELAS REVERSIÓN             ║");
+                Print("╠══════════════════════════════════════════════════════════════╣");
+                Print($"║ Hora: {Time[0]:yyyy-MM-dd HH:mm:ss}                             ║");
+                Print($"║ Modo Comisiones: {(IncluirComisionesEnCalculos ? "INCLUIDAS" : "EXCLUIDAS"),-10}                         ║");
+                Print("║                                                              ║");
+                Print("║ ═══ DETECCIÓN DE PATRONES (D-E-F) ═══                       ║");
+                Print($"║ Patrones Alcistas: {patronesAlcistasDetectados,3}                                  ║");
+                Print($"║ Patrones Bajistas: {patronesBajistasDetectados,3}                                  ║");
+                Print($"║ Total Patrones: {totalPatrones,3}                                     ║");
+                Print("║                                                              ║");
+                Print("║ ═══ EFECTIVIDAD DE FILTROS ═══                               ║");
+                Print($"║ Rechazados por Ratio: {patronesRechazadosPorRatio,3}                             ║");
+                Print($"║ Rechazados por Size: {patronesRechazadosPorSize,3}                              ║");
+                Print($"║ Rechazados por Zonas: {patronesRechazadosPorZonas,3}                             ║");
+                Print($"║ Rechazados por Horario: {operacionesRechazadasPorHorario,3}                           ║");
+                Print($"║ Patrones Válidos: {patronesValidosTotal,3}                                  ║");
+                Print("║                                                              ║");
+                Print("║ ═══ PATRONES RENTABLES ═══                                   ║");
+                Print($"║ Con Reversión Válida: {patronesConReversionValida,3}                              ║");
+                Print($"║ Tasa de Reversión: {tasaReversion,5:F1}%                                ║");
+                Print($"║ Sin Reversión: {patronesValidosTotal - patronesConReversionValida,3}                                     ║");
+                Print("║                                                              ║");
+                Print("║ ═══ ANÁLISIS DE RECORRIDOS ═══                               ║");
+                Print($"║ Recorrido Promedio: {recorridoPromedio,6:F1} ticks                        ║");
+                Print($"║ Recorridos > 80 ticks: {recorridosMayores80,3} ({porcentajeMayores80,5:F1}%)                  ║");
+                Print($"║ Total Mediciones: {totalRecorridos,3}                                   ║");
+                Print("║                                                              ║");
+                Print("║ ═══ DISTRIBUCIÓN DE RECORRIDOS (intervalos 16 ticks) ═══    ║");
+                
+                foreach (var kvp in distribucionRecorridos.OrderBy(x => x.Key))
+                {
+                    double porcentaje = totalRecorridos > 0 ? (kvp.Value * 100.0 / totalRecorridos) : 0;
+                    string barra = GenerarBarraProgreso(porcentaje, 15);
+                    
+                    string marcador = "";
+                    if (kvp.Key.StartsWith("[81") || kvp.Key.StartsWith("[97") || 
+                        kvp.Key.StartsWith("[113") || kvp.Key.StartsWith("[129") || 
+                        kvp.Key.StartsWith("[145") || kvp.Key.StartsWith("[160"))
+                    {
+                        marcador = kvp.Value > 0 ? "★" : " ";
+                    }
+                    else
+                    {
+                        marcador = " ";
+                    }
+                    
+                    Print($"║ {marcador} {kvp.Key,-12} : {kvp.Value,3} ({porcentaje,5:F1}%) {barra,-15} ║");
+                }
+                
+                Print("║                                                              ║");
+                Print("║ Nota: ★ indica movimientos mayores a 80 ticks               ║");
+                Print($"║ Órdenes Registradas: {ordenesLog.Count,3}                                 ║");
+                Print("║                                                              ║");
+                Print("║ ═══ CONFIGURACIÓN FILTROS ACTIVOS ═══                       ║");
+                Print($"║ Ratio Máximo: {RatioPatron,6:F2}                                     ║");
+                Print($"║ Size Máximo: {SizePatron,3} ticks                                  ║");
+                Print($"║ Filtro Zonas: {(UsarFiltroZonasPremium ? "ACTIVO" : "INACTIVO"),-8}                               ║");
+                Print($"║ Filtro Horario: {(UsarFiltroHorario ? "ACTIVO" : "INACTIVO"),-8}                             ║");
+                if (UsarFiltroHorario)
+                {
+                    Print($"║   Horario Inactivo: {HoraInicioInactivo:D2}:{MinutoInicioInactivo:D2} - {HoraFinInactivo:D2}:{MinutoFinInactivo:D2}              ║");
+                }
+                Print($"║ Velas Reversión: {VelasReversionRequeridas,2}                                   ║");
+                Print("╚══════════════════════════════════════════════════════════════╝");
+                
+                ultimoReporteEstadisticas = Time[0];
+            }
+        }
+
+        private string GenerarBarraProgreso(double porcentaje, int longitudMax)
+        {
+            int bloques = (int)Math.Round(porcentaje / 6.67);
+            bloques = Math.Min(bloques, longitudMax);
+            return new string('█', bloques);
+        }
+
+        #endregion
+    }
+}
