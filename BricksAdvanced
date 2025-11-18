@@ -1,0 +1,985 @@
+#region Using declarations
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.ComponentModel.DataAnnotations;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+using System.Windows;
+using System.Windows.Input;
+using System.Windows.Media;
+using System.Xml.Serialization;
+using NinjaTrader.Cbi;
+using NinjaTrader.Gui;
+using NinjaTrader.Gui.Chart;
+using NinjaTrader.Gui.SuperDom;
+using NinjaTrader.Gui.Tools;
+using NinjaTrader.Data;
+using NinjaTrader.NinjaScript;
+using NinjaTrader.Core.FloatingPoint;
+using NinjaTrader.NinjaScript.DrawingTools;
+using NinjaTrader.NinjaScript.Indicators;
+#endregion
+
+namespace NinjaTrader.NinjaScript.Indicators
+{
+    /// <summary>
+    /// Indicador que crea rectángulos de altura fija (ladrillos) con API completa para estrategias
+    /// </summary>
+    public class BricksAdvanced : Indicator
+    {
+        #region Eventos Públicos
+        
+        /// <summary>
+        /// Evento disparado cuando se crea un nuevo rectángulo
+        /// </summary>
+        public event EventHandler<RectanguloEventArgs> NuevoRectangulo;
+        
+        /// <summary>
+        /// Evento disparado cuando se cierra un rectángulo
+        /// </summary>
+        public event EventHandler<RectanguloEventArgs> RectanguloCerrado;
+        
+        /// <summary>
+        /// Evento disparado cuando el precio escapa de un rectángulo
+        /// </summary>
+        public event EventHandler<EscapeEventArgs> EscapeDetectado;
+        
+        #endregion
+        
+        #region Clases de Datos Públicas
+        
+        /// <summary>
+        /// Argumentos del evento de rectángulo
+        /// </summary>
+        public class RectanguloEventArgs : EventArgs
+        {
+            public RectanguloData Rectangulo { get; set; }
+            public DateTime Timestamp { get; set; }
+            public double PrecioEscape { get; set; }
+        }
+        
+        /// <summary>
+        /// Argumentos del evento de escape
+        /// </summary>
+        public class EscapeEventArgs : EventArgs
+        {
+            public double PrecioEscape { get; set; }
+            public DireccionEscape Direccion { get; set; }
+            public DateTime Timestamp { get; set; }
+            public RectanguloData RectanguloAnterior { get; set; }
+        }
+        
+        /// <summary>
+        /// Clase para almacenar datos de cada rectángulo
+        /// </summary>
+        public class RectanguloData
+        {
+            public DateTime TiempoInicio { get; set; }
+            public DateTime TiempoFin { get; set; }
+            public double PrecioSuperior { get; set; }
+            public double PrecioInferior { get; set; }
+            public double PrecioBase { get; set; }
+            public DireccionEscape Direccion { get; set; }
+            public string Tag { get; set; }
+            public double AlturaEnTicks { get; set; }
+            public double DuracionEnMinutos { get; set; }
+        }
+        
+        /// <summary>
+        /// Información del estado actual del rectángulo
+        /// </summary>
+        public class EstadoRectangulo
+        {
+            public bool RectanguloActivo { get; set; }
+            public double PrecioBase { get; set; }
+            public double BorderSuperior { get; set; }
+            public double BorderInferior { get; set; }
+            public double ZonaEscapeSuperior { get; set; }
+            public double ZonaEscapeInferior { get; set; }
+            public DateTime InicioRectangulo { get; set; }
+            public int NumeroRectangulo { get; set; }
+        }
+        
+        /// <summary>
+        /// Clase para estadísticas de rectángulos
+        /// </summary>
+        public class EstadisticasRectangulos
+        {
+            public int TotalRectangulos { get; set; }
+            public int RectangulosAlcistas { get; set; }
+            public int RectangulosBajistas { get; set; }
+            public double DuracionPromedio { get; set; }
+            public double DuracionMaxima { get; set; }
+            public double DuracionMinima { get; set; }
+        }
+        
+        /// <summary>
+        /// Enumeración para dirección del escape
+        /// </summary>
+        public enum DireccionEscape
+        {
+            Alcista,
+            Bajista
+        }
+        
+        #endregion
+        
+        #region Variables Privadas
+        
+        // Estado del rectángulo actual
+        private double precioBaseActual;
+        private double bordeSuperiorActual;
+        private double bordeInferiorActual;
+        private double zonaEscapeSuperior;
+        private double zonaEscapeInferior;
+        private DateTime inicioRectanguloActual;
+        private bool rectanguloActivo = false;
+        private bool primerDiaInicializado = false;
+        
+        // Gestión de rectángulos
+        private List<RectanguloData> rectangulos;
+        private int contadorRectangulos = 0;
+        
+        // Cálculos auxiliares
+        private double alturaRectangulo;
+        private double distanciaEscape;
+        private double instrumentTickSize;
+        
+        #endregion
+        
+        #region Propiedades Configurables
+        
+        [NinjaScriptProperty]
+        [Range(1, int.MaxValue)]
+        [Display(Name = "Altura Ladrillo (nTicks)", Description = "Altura fija del rectángulo en ticks", Order = 1, GroupName = "Configuración Principal")]
+        public int NTicks { get; set; } = 10;
+        
+        [NinjaScriptProperty]
+        [Range(1, int.MaxValue)]
+        [Display(Name = "Distancia Escape (ticks)", Description = "Distancia adicional para activar nuevo rectángulo", Order = 2, GroupName = "Configuración Principal")]
+        public int Escape { get; set; } = 2;
+        
+        [NinjaScriptProperty]
+        [Range(10, 1000)]
+        [Display(Name = "Máximo Rectángulos", Description = "Número máximo de rectángulos a mantener en el gráfico", Order = 3, GroupName = "Configuración Principal")]
+        public int MaxRectangulos { get; set; } = 200;
+        
+        [NinjaScriptProperty]
+        [XmlIgnore]
+        [Display(Name = "Color Rectángulo Alcista", Description = "Color para rectángulos de escape alcista", Order = 4, GroupName = "Apariencia")]
+        public Brush ColorAlcista { get; set; } = Brushes.LimeGreen;
+        
+        [Browsable(false)]
+        public string ColorAlcistaSerializable
+        {
+            get { return Serialize.BrushToString(ColorAlcista); }
+            set { ColorAlcista = Serialize.StringToBrush(value); }
+        }
+        
+        [NinjaScriptProperty]
+        [XmlIgnore]
+        [Display(Name = "Color Rectángulo Bajista", Description = "Color para rectángulos de escape bajista", Order = 5, GroupName = "Apariencia")]
+        public Brush ColorBajista { get; set; } = Brushes.Red;
+        
+        [Browsable(false)]
+        public string ColorBajistaSerializable
+        {
+            get { return Serialize.BrushToString(ColorBajista); }
+            set { ColorBajista = Serialize.StringToBrush(value); }
+        }
+        
+        [NinjaScriptProperty]
+        [Range(1, 100)]
+        [Display(Name = "Opacidad (%)", Description = "Opacidad del relleno del rectángulo (1-100)", Order = 6, GroupName = "Apariencia")]
+        public int Opacidad { get; set; } = 20;
+        
+        [NinjaScriptProperty]
+        [Range(1, 10)]
+        [Display(Name = "Grosor Borde", Description = "Grosor del borde del rectángulo", Order = 7, GroupName = "Apariencia")]
+        public int GrosorBorde { get; set; } = 1;
+        
+        [NinjaScriptProperty]
+        [Display(Name = "Mostrar Rectángulo Activo", Description = "Mostrar el rectángulo que se está formando actualmente", Order = 8, GroupName = "Apariencia")]
+        public bool MostrarRectanguloActivo { get; set; } = true;
+        
+        #endregion
+        
+        #region API Pública Para Estrategias
+        
+        /// <summary>
+        /// Obtiene el estado actual del rectángulo activo
+        /// </summary>
+        public EstadoRectangulo ObtenerEstadoActual()
+        {
+            return new EstadoRectangulo
+            {
+                RectanguloActivo = rectanguloActivo,
+                PrecioBase = precioBaseActual,
+                BorderSuperior = bordeSuperiorActual,
+                BorderInferior = bordeInferiorActual,
+                ZonaEscapeSuperior = zonaEscapeSuperior,
+                ZonaEscapeInferior = zonaEscapeInferior,
+                InicioRectangulo = inicioRectanguloActual,
+                NumeroRectangulo = contadorRectangulos
+            };
+        }
+        
+        /// <summary>
+        /// Obtiene la lista de rectángulos históricos (copia de solo lectura)
+        /// </summary>
+        public List<RectanguloData> ObtenerRectangulosHistoricos()
+        {
+            return rectangulos?.ToList() ?? new List<RectanguloData>();
+        }
+        
+        /// <summary>
+        /// Obtiene el último rectángulo cerrado
+        /// </summary>
+        public RectanguloData ObtenerUltimoRectangulo()
+        {
+            return rectangulos?.LastOrDefault();
+        }
+        
+        /// <summary>
+        /// Obtiene los últimos N rectángulos
+        /// </summary>
+        public List<RectanguloData> ObtenerUltimosRectangulos(int cantidad)
+        {
+            if (rectangulos == null || rectangulos.Count == 0)
+                return new List<RectanguloData>();
+                
+            return rectangulos.Skip(Math.Max(0, rectangulos.Count - cantidad)).ToList();
+        }
+        
+        /// <summary>
+        /// Verifica si el precio está dentro del rectángulo actual
+        /// </summary>
+        public bool EstaEnRectanguloActual(double precio)
+        {
+            if (!rectanguloActivo)
+                return false;
+                
+            return precio >= bordeInferiorActual && precio <= bordeSuperiorActual;
+        }
+        
+        /// <summary>
+        /// Verifica si el precio está en zona de escape superior
+        /// </summary>
+        public bool EstaEnZonaEscapeAlcista(double precio)
+        {
+            if (!rectanguloActivo)
+                return false;
+                
+            return precio > zonaEscapeSuperior;
+        }
+        
+        /// <summary>
+        /// Verifica si el precio está en zona de escape inferior
+        /// </summary>
+        public bool EstaEnZonaEscapeBajista(double precio)
+        {
+            if (!rectanguloActivo)
+                return false;
+                
+            return precio < zonaEscapeInferior;
+        }
+        
+        /// <summary>
+        /// Calcula la distancia del precio al borde más cercano del rectángulo
+        /// </summary>
+        public double DistanciaAlBordeMasCercano(double precio)
+        {
+            if (!rectanguloActivo)
+                return double.NaN;
+                
+            double distanciaSuperior = Math.Abs(precio - bordeSuperiorActual);
+            double distanciaInferior = Math.Abs(precio - bordeInferiorActual);
+            
+            return Math.Min(distanciaSuperior, distanciaInferior);
+        }
+        
+        /// <summary>
+        /// Calcula la distancia del precio al centro del rectángulo
+        /// </summary>
+        public double DistanciaAlCentro(double precio)
+        {
+            if (!rectanguloActivo)
+                return double.NaN;
+                
+            return Math.Abs(precio - precioBaseActual);
+        }
+        
+        /// <summary>
+        /// Obtiene estadísticas de los rectángulos
+        /// </summary>
+        public EstadisticasRectangulos ObtenerEstadisticas()
+        {
+            if (rectangulos == null || rectangulos.Count == 0)
+                return new EstadisticasRectangulos();
+                
+            return new EstadisticasRectangulos
+            {
+                TotalRectangulos = rectangulos.Count,
+                RectangulosAlcistas = rectangulos.Count(r => r.Direccion == DireccionEscape.Alcista),
+                RectangulosBajistas = rectangulos.Count(r => r.Direccion == DireccionEscape.Bajista),
+                DuracionPromedio = rectangulos.Average(r => r.DuracionEnMinutos),
+                DuracionMaxima = rectangulos.Max(r => r.DuracionEnMinutos),
+                DuracionMinima = rectangulos.Min(r => r.DuracionEnMinutos)
+            };
+        }
+        
+        /// <summary>
+        /// Verifica si hay una tendencia alcista en los últimos N rectángulos
+        /// </summary>
+        public bool TendenciaAlcista(int ultimosRectangulos = 3)
+        {
+            var ultimos = ObtenerUltimosRectangulos(ultimosRectangulos);
+            
+            if (ultimos.Count < 2)
+                return false;
+                
+            return ultimos.Count(r => r.Direccion == DireccionEscape.Alcista) > 
+                   ultimos.Count(r => r.Direccion == DireccionEscape.Bajista);
+        }
+        
+        /// <summary>
+        /// Verifica si hay una tendencia bajista en los últimos N rectángulos
+        /// </summary>
+        public bool TendenciaBajista(int ultimosRectangulos = 3)
+        {
+            var ultimos = ObtenerUltimosRectangulos(ultimosRectangulos);
+            
+            if (ultimos.Count < 2)
+                return false;
+                
+            return ultimos.Count(r => r.Direccion == DireccionEscape.Bajista) > 
+                   ultimos.Count(r => r.Direccion == DireccionEscape.Alcista);
+        }
+        
+        /// <summary>
+        /// Cambia dinámicamente el valor del escape
+        /// </summary>
+        public void CambiarEscape(int nuevoEscape)
+        {
+            if (nuevoEscape < 1)
+            {
+                Print("Error: Escape debe ser mayor a 0");
+                return;
+            }
+            
+            Escape = nuevoEscape;
+            distanciaEscape = nuevoEscape * instrumentTickSize;
+            
+            // Recalcular zonas si hay rectángulo activo
+            if (rectanguloActivo)
+            {
+                CalcularBordesYZonasEscape();
+                Print($"Escape actualizado a {nuevoEscape} ticks - Nuevas zonas recalculadas");
+            }
+            else
+            {
+                Print($"Escape actualizado a {nuevoEscape} ticks");
+            }
+        }
+        
+        /// <summary>
+        /// Cambia dinámicamente la altura de los ladrillos
+        /// </summary>
+        public void CambiarAltura(int nuevosNTicks)
+        {
+            if (nuevosNTicks < 1)
+            {
+                Print("Error: nTicks debe ser mayor a 0");
+                return;
+            }
+            
+            NTicks = nuevosNTicks;
+            alturaRectangulo = nuevosNTicks * instrumentTickSize;
+            
+            // Recalcular zonas si hay rectángulo activo
+            if (rectanguloActivo)
+            {
+                CalcularBordesYZonasEscape();
+                Print($"Altura actualizada a {nuevosNTicks} ticks - Nuevas zonas recalculadas");
+            }
+            else
+            {
+                Print($"Altura actualizada a {nuevosNTicks} ticks");
+            }
+        }
+        
+        /// <summary>
+        /// Cambia ambos parámetros de una vez
+        /// </summary>
+        public void CambiarParametros(int nuevosNTicks, int nuevoEscape)
+        {
+            if (nuevosNTicks < 1 || nuevoEscape < 1)
+            {
+                Print("Error: nTicks y Escape deben ser mayor a 0");
+                return;
+            }
+            
+            NTicks = nuevosNTicks;
+            Escape = nuevoEscape;
+            alturaRectangulo = nuevosNTicks * instrumentTickSize;
+            distanciaEscape = nuevoEscape * instrumentTickSize;
+            
+            // Recalcular zonas si hay rectángulo activo
+            if (rectanguloActivo)
+            {
+                CalcularBordesYZonasEscape();
+                Print($"Parámetros actualizados - nTicks: {nuevosNTicks}, Escape: {nuevoEscape}");
+            }
+        }
+        
+        /// <summary>
+        /// Fuerza el cierre del rectángulo actual y crea uno nuevo
+        /// </summary>
+        public void ForzarNuevoRectangulo(DireccionEscape direccion)
+        {
+            if (!rectanguloActivo)
+            {
+                Print("No hay rectángulo activo para cerrar");
+                return;
+            }
+            
+            DateTime tiempoActual = Time[0];
+            double precioActual = Close[0];
+            
+            // Cerrar rectángulo actual
+            CerrarRectanguloActual(tiempoActual);
+            
+            // Crear nuevo rectángulo en la dirección especificada
+            CrearNuevoRectangulo(precioActual, direccion, tiempoActual);
+            
+            Print($"Rectángulo forzado - Nueva dirección: {direccion}");
+        }
+        
+        /// <summary>
+        /// Reinicia el indicador con el precio actual como base
+        /// </summary>
+        public void ReiniciarConPrecioActual()
+        {
+            try
+            {
+                // Limpiar rectángulo activo
+                if (rectanguloActivo)
+                {
+                    RemoveDrawObject("RectBrick_Activo");
+                }
+                
+                // Reinicializar con precio actual
+                precioBaseActual = Close[0];
+                CalcularBordesYZonasEscape();
+                inicioRectanguloActual = Time[0];
+                rectanguloActivo = true;
+                
+                Print($"Indicador reiniciado - Nueva base: {precioBaseActual:F2}");
+            }
+            catch (Exception ex)
+            {
+                Print($"Error al reiniciar indicador: {ex.Message}");
+            }
+        }
+        
+        /// <summary>
+        /// Obtiene información detallada del rectángulo actual
+        /// </summary>
+        public string ObtenerInfoDetallada()
+        {
+            if (!rectanguloActivo)
+                return "No hay rectángulo activo";
+                
+            var info = new StringBuilder();
+            info.AppendLine($"=== RECTÁNGULO ACTUAL ===");
+            info.AppendLine($"Base: {precioBaseActual:F2}");
+            info.AppendLine($"Borde Superior: {bordeSuperiorActual:F2}");
+            info.AppendLine($"Borde Inferior: {bordeInferiorActual:F2}");
+            info.AppendLine($"Zona Escape Superior: {zonaEscapeSuperior:F2}");
+            info.AppendLine($"Zona Escape Inferior: {zonaEscapeInferior:F2}");
+            info.AppendLine($"Inicio: {inicioRectanguloActual:HH:mm:ss}");
+            info.AppendLine($"Duración: {(Time[0] - inicioRectanguloActual).TotalMinutes:F1} min");
+            info.AppendLine($"nTicks: {NTicks}");
+            info.AppendLine($"Escape: {Escape}");
+            
+            return info.ToString();
+        }
+        
+        #endregion
+        
+        #region Métodos de Estado
+        
+        protected override void OnStateChange()
+        {
+            if (State == State.SetDefaults)
+            {
+                Description = @"Indicador de rectángulos con API completa para estrategias";
+                Name = "BricksAdvanced";
+                Calculate = Calculate.OnEachTick;
+                IsOverlay = true;
+                DisplayInDataBox = true;
+                DrawOnPricePanel = true;
+                DrawHorizontalGridLines = true;
+                DrawVerticalGridLines = true;
+                PaintPriceMarkers = true;
+                ScaleJustification = NinjaTrader.Gui.Chart.ScaleJustification.Right;
+                IsSuspendedWhileInactive = false;
+                
+                // Inicializar propiedades por defecto
+                NTicks = 10;
+                Escape = 2;
+                MaxRectangulos = 200;
+                Opacidad = 20;
+                GrosorBorde = 1;
+                MostrarRectanguloActivo = true;
+            }
+            else if (State == State.DataLoaded)
+            {
+                // Inicializar variables
+                rectangulos = new List<RectanguloData>();
+                instrumentTickSize = TickSize;
+                alturaRectangulo = NTicks * instrumentTickSize;
+                distanciaEscape = Escape * instrumentTickSize;
+                rectanguloActivo = false;
+                primerDiaInicializado = false;
+                contadorRectangulos = 0;
+                
+                Print($"BricksAdvanced inicializado - TickSize: {instrumentTickSize}");
+            }
+            else if (State == State.Terminated)
+            {
+                LimpiarTodosLosRectangulos();
+            }
+        }
+        
+        protected override void OnBarUpdate()
+        {
+            if (CurrentBar < 1 || !IsValidDataPoint(Close[0]))
+                return;
+                
+            if (!primerDiaInicializado && IsPrimerBarDelDia())
+            {
+                InicializarPrimerRectangulo();
+                return;
+            }
+            
+            if (!rectanguloActivo)
+                return;
+                
+            VerificarEscapeEnBarra();
+                
+            if (MostrarRectanguloActivo)
+            {
+                ActualizarRectanguloActivo();
+            }
+        }
+        
+        protected override void OnMarketData(MarketDataEventArgs marketDataUpdate)
+        {
+            if (marketDataUpdate.MarketDataType != MarketDataType.Last)
+                return;
+                
+            if (!IsValidDataPoint(marketDataUpdate.Price) || !rectanguloActivo)
+                return;
+                
+            double precioActual = marketDataUpdate.Price;
+            
+            if (precioActual > zonaEscapeSuperior)
+            {
+                DispararEventoEscape(precioActual, DireccionEscape.Alcista, marketDataUpdate.Time);
+                CerrarRectanguloActual(marketDataUpdate.Time);
+                CrearNuevoRectangulo(precioActual, DireccionEscape.Alcista, marketDataUpdate.Time);
+            }
+            else if (precioActual < zonaEscapeInferior)
+            {
+                DispararEventoEscape(precioActual, DireccionEscape.Bajista, marketDataUpdate.Time);
+                CerrarRectanguloActual(marketDataUpdate.Time);
+                CrearNuevoRectangulo(precioActual, DireccionEscape.Bajista, marketDataUpdate.Time);
+            }
+        }
+        
+        #endregion
+        
+        #region Implementación Completa de Métodos Internos
+        
+        private void DispararEventoEscape(double precio, DireccionEscape direccion, DateTime tiempo)
+        {
+            EscapeDetectado?.Invoke(this, new EscapeEventArgs
+            {
+                PrecioEscape = precio,
+                Direccion = direccion,
+                Timestamp = tiempo,
+                RectanguloAnterior = rectangulos?.LastOrDefault()
+            });
+        }
+        
+        private void VerificarEscapeEnBarra()
+        {
+            try
+            {
+                bool escapePorAlto = High[0] > zonaEscapeSuperior;
+                bool escapePorBajo = Low[0] < zonaEscapeInferior;
+                
+                if (escapePorAlto)
+                {
+                    DispararEventoEscape(High[0], DireccionEscape.Alcista, Time[0]);
+                    CerrarRectanguloActual(Time[0]);
+                    CrearNuevoRectangulo(High[0], DireccionEscape.Alcista, Time[0]);
+                }
+                else if (escapePorBajo)
+                {
+                    DispararEventoEscape(Low[0], DireccionEscape.Bajista, Time[0]);
+                    CerrarRectanguloActual(Time[0]);
+                    CrearNuevoRectangulo(Low[0], DireccionEscape.Bajista, Time[0]);
+                }
+            }
+            catch (Exception ex)
+            {
+                Print($"Error al verificar escape en barra: {ex.Message}");
+            }
+        }
+        
+        private void InicializarPrimerRectangulo()
+        {
+            try
+            {
+                double precioOpen = Open[0];
+                
+                if (!IsValidDataPoint(precioOpen))
+                {
+                    Print("Error: Precio Open inválido para inicialización");
+                    return;
+                }
+                
+                precioBaseActual = precioOpen;
+                CalcularBordesYZonasEscape();
+                inicioRectanguloActual = Time[0];
+                rectanguloActivo = true;
+                primerDiaInicializado = true;
+                
+                Print($"Primer rectángulo inicializado - Base: {precioBaseActual:F2}");
+            }
+            catch (Exception ex)
+            {
+                Print($"Error al inicializar primer rectángulo: {ex.Message}");
+            }
+        }
+        
+        private void CrearNuevoRectangulo(double precioEscape, DireccionEscape direccion, DateTime tiempo)
+        {
+            try
+            {
+                // Calcular nuevo precio base según dirección del escape
+                double nuevoPrecioBase;
+                
+                if (direccion == DireccionEscape.Alcista)
+                {
+                    nuevoPrecioBase = precioBaseActual + alturaRectangulo;
+                }
+                else // Bajista
+                {
+                    nuevoPrecioBase = precioBaseActual - alturaRectangulo;
+                }
+                
+                // Verificar y manejar gaps si es necesario
+                nuevoPrecioBase = VerificarYManejarGaps(nuevoPrecioBase);
+                
+                // Actualizar estado del nuevo rectángulo
+                precioBaseActual = nuevoPrecioBase;
+                CalcularBordesYZonasEscape();
+                inicioRectanguloActual = tiempo;
+                rectanguloActivo = true;
+                
+                // Disparar evento de nuevo rectángulo
+                var rectData = new RectanguloData
+                {
+                    TiempoInicio = tiempo,
+                    PrecioBase = nuevoPrecioBase,
+                    PrecioSuperior = bordeSuperiorActual,
+                    PrecioInferior = bordeInferiorActual,
+                    Direccion = direccion,
+                    AlturaEnTicks = NTicks
+                };
+                
+                NuevoRectangulo?.Invoke(this, new RectanguloEventArgs
+                {
+                    Rectangulo = rectData,
+                    Timestamp = tiempo,
+                    PrecioEscape = precioEscape
+                });
+                
+                Print($"Nuevo rectángulo {direccion} - Base: {precioBaseActual:F2}");
+            }
+            catch (Exception ex)
+            {
+                Print($"Error al crear nuevo rectángulo: {ex.Message}");
+            }
+        }
+        
+        private void CerrarRectanguloActual(DateTime tiempoFin)
+        {
+            try
+            {
+                if (!rectanguloActivo)
+                    return;
+                    
+                // Crear objeto de datos del rectángulo
+                var rectangulo = new RectanguloData
+                {
+                    TiempoInicio = inicioRectanguloActual,
+                    TiempoFin = tiempoFin,
+                    PrecioSuperior = bordeSuperiorActual,
+                    PrecioInferior = bordeInferiorActual,
+                    PrecioBase = precioBaseActual,
+                    Direccion = DeterminarDireccionRectangulo(),
+                    Tag = $"BrickAdv_{contadorRectangulos++}",
+                    AlturaEnTicks = NTicks,
+                    DuracionEnMinutos = (tiempoFin - inicioRectanguloActual).TotalMinutes
+                };
+                
+                // Dibujar rectángulo en el gráfico
+                DibujarRectangulo(rectangulo);
+                
+                // Agregar a la lista de rectángulos
+                rectangulos.Add(rectangulo);
+                
+                // Disparar evento de rectángulo cerrado
+                RectanguloCerrado?.Invoke(this, new RectanguloEventArgs
+                {
+                    Rectangulo = rectangulo,
+                    Timestamp = tiempoFin
+                });
+                
+                // Limpiar rectángulos antiguos si excede el límite
+                if (rectangulos.Count > MaxRectangulos)
+                {
+                    LimpiarRectangulosAntiguos();
+                }
+                
+                Print($"Rectángulo cerrado - Duración: {rectangulo.DuracionEnMinutos:F1} min");
+            }
+            catch (Exception ex)
+            {
+                Print($"Error al cerrar rectángulo: {ex.Message}");
+            }
+        }
+        
+        private void DibujarRectangulo(RectanguloData rectangulo)
+        {
+            try
+            {
+                // Determinar color según dirección
+                Brush colorBorde = rectangulo.Direccion == DireccionEscape.Alcista ? ColorAlcista : ColorBajista;
+                
+                // Crear brush con opacidad para relleno
+                var colorRelleno = colorBorde.Clone();
+                colorRelleno.Opacity = Opacidad / 100.0;
+                colorRelleno.Freeze();
+                
+                // Dibujar rectángulo
+                Draw.Rectangle(this, rectangulo.Tag, false,
+                    rectangulo.TiempoInicio, rectangulo.PrecioInferior,
+                    rectangulo.TiempoFin, rectangulo.PrecioSuperior,
+                    colorBorde, colorRelleno, GrosorBorde);
+            }
+            catch (Exception ex)
+            {
+                Print($"Error al dibujar rectángulo {rectangulo.Tag}: {ex.Message}");
+            }
+        }
+        
+        private void ActualizarRectanguloActivo()
+        {
+            try
+            {
+                if (!rectanguloActivo)
+                    return;
+                    
+                string tagActivo = "BrickAdv_Activo";
+                
+                // Remover rectángulo activo anterior
+                RemoveDrawObject(tagActivo);
+                
+                // Crear brush para rectángulo activo (más transparente)
+                var colorActivo = Brushes.Yellow.Clone();
+                colorActivo.Opacity = 0.1;
+                colorActivo.Freeze();
+                
+                // Dibujar rectángulo activo
+                Draw.Rectangle(this, tagActivo, false,
+                    inicioRectanguloActual, bordeInferiorActual,
+                    Time[0], bordeSuperiorActual,
+                    Brushes.Yellow, colorActivo, 1);
+            }
+            catch (Exception ex)
+            {
+                Print($"Error al actualizar rectángulo activo: {ex.Message}");
+            }
+        }
+        
+        private void CalcularBordesYZonasEscape()
+        {
+            bordeSuperiorActual = precioBaseActual + (alturaRectangulo / 2.0);
+            bordeInferiorActual = precioBaseActual - (alturaRectangulo / 2.0);
+            zonaEscapeSuperior = bordeSuperiorActual + distanciaEscape;
+            zonaEscapeInferior = bordeInferiorActual - distanciaEscape;
+        }
+        
+        private double VerificarYManejarGaps(double precioCalculado)
+        {
+            try
+            {
+                if (CurrentBar >= 0)
+                {
+                    double openActual = Open[0];
+                    double diferencia = Math.Abs(precioCalculado - openActual);
+                    
+                    if (diferencia > alturaRectangulo)
+                    {
+                        Print($"Gap detectado - usando Open: {openActual:F2}");
+                        return openActual;
+                    }
+                }
+                return precioCalculado;
+            }
+            catch (Exception ex)
+            {
+                Print($"Error al verificar gaps: {ex.Message}");
+                return precioCalculado;
+            }
+        }
+        
+        private DireccionEscape DeterminarDireccionRectangulo()
+        {
+            if (rectangulos.Count > 0)
+            {
+                var ultimoRectangulo = rectangulos[rectangulos.Count - 1];
+                return precioBaseActual > ultimoRectangulo.PrecioBase ? 
+                    DireccionEscape.Alcista : DireccionEscape.Bajista;
+            }
+            return DireccionEscape.Alcista;
+        }
+        
+        private bool IsValidDataPoint(double precio)
+        {
+            return !double.IsNaN(precio) && !double.IsInfinity(precio) && precio > 0;
+        }
+        
+        private bool IsPrimerBarDelDia()
+        {
+            if (CurrentBar == 0)
+                return true;
+            return Time[0].Date != Time[1].Date;
+        }
+        
+        private void LimpiarRectangulosAntiguos()
+        {
+            try
+            {
+                int rectangulos_a_eliminar = rectangulos.Count - MaxRectangulos;
+                
+                for (int i = 0; i < rectangulos_a_eliminar; i++)
+                {
+                    var rectangulo = rectangulos[0];
+                    
+                    if (!string.IsNullOrEmpty(rectangulo.Tag))
+                    {
+                        RemoveDrawObject(rectangulo.Tag);
+                    }
+                    rectangulos.RemoveAt(0);
+                }
+                
+                Print($"Limpieza: {rectangulos_a_eliminar} rectángulos eliminados");
+            }
+            catch (Exception ex)
+            {
+                Print($"Error al limpiar rectángulos antiguos: {ex.Message}");
+            }
+        }
+        
+        private void LimpiarTodosLosRectangulos()
+        {
+            try
+            {
+                if (rectangulos != null)
+                {
+                    foreach (var rectangulo in rectangulos)
+                    {
+                        if (!string.IsNullOrEmpty(rectangulo.Tag))
+                        {
+                            RemoveDrawObject(rectangulo.Tag);
+                        }
+                    }
+                    rectangulos.Clear();
+                }
+                RemoveDrawObject("BrickAdv_Activo");
+                Print("Todos los rectángulos limpiados");
+            }
+            catch (Exception ex)
+            {
+                Print($"Error al limpiar rectángulos: {ex.Message}");
+            }
+        }
+        
+        #endregion
+    }
+}
+
+#region NinjaScript generated code. Neither change nor remove.
+
+namespace NinjaTrader.NinjaScript.Indicators
+{
+	public partial class Indicator : NinjaTrader.Gui.NinjaScript.IndicatorRenderBase
+	{
+		private BricksAdvanced[] cacheBricksAdvanced;
+		public BricksAdvanced BricksAdvanced(int nTicks, int escape, int maxRectangulos, Brush colorAlcista, Brush colorBajista, int opacidad, int grosorBorde, bool mostrarRectanguloActivo)
+		{
+			return BricksAdvanced(Input, nTicks, escape, maxRectangulos, colorAlcista, colorBajista, opacidad, grosorBorde, mostrarRectanguloActivo);
+		}
+
+		public BricksAdvanced BricksAdvanced(ISeries<double> input, int nTicks, int escape, int maxRectangulos, Brush colorAlcista, Brush colorBajista, int opacidad, int grosorBorde, bool mostrarRectanguloActivo)
+		{
+			if (cacheBricksAdvanced != null)
+				for (int idx = 0; idx < cacheBricksAdvanced.Length; idx++)
+					if (cacheBricksAdvanced[idx] != null && cacheBricksAdvanced[idx].NTicks == nTicks && cacheBricksAdvanced[idx].Escape == escape && cacheBricksAdvanced[idx].MaxRectangulos == maxRectangulos && cacheBricksAdvanced[idx].ColorAlcista == colorAlcista && cacheBricksAdvanced[idx].ColorBajista == colorBajista && cacheBricksAdvanced[idx].Opacidad == opacidad && cacheBricksAdvanced[idx].GrosorBorde == grosorBorde && cacheBricksAdvanced[idx].MostrarRectanguloActivo == mostrarRectanguloActivo && cacheBricksAdvanced[idx].EqualsInput(input))
+						return cacheBricksAdvanced[idx];
+			return CacheIndicator<BricksAdvanced>(new BricksAdvanced(){ NTicks = nTicks, Escape = escape, MaxRectangulos = maxRectangulos, ColorAlcista = colorAlcista, ColorBajista = colorBajista, Opacidad = opacidad, GrosorBorde = grosorBorde, MostrarRectanguloActivo = mostrarRectanguloActivo }, input, ref cacheBricksAdvanced);
+		}
+	}
+}
+
+namespace NinjaTrader.NinjaScript.MarketAnalyzerColumns
+{
+	public partial class MarketAnalyzerColumn : MarketAnalyzerColumnBase
+	{
+		public Indicators.BricksAdvanced BricksAdvanced(int nTicks, int escape, int maxRectangulos, Brush colorAlcista, Brush colorBajista, int opacidad, int grosorBorde, bool mostrarRectanguloActivo)
+		{
+			return indicator.BricksAdvanced(Input, nTicks, escape, maxRectangulos, colorAlcista, colorBajista, opacidad, grosorBorde, mostrarRectanguloActivo);
+		}
+
+		public Indicators.BricksAdvanced BricksAdvanced(ISeries<double> input , int nTicks, int escape, int maxRectangulos, Brush colorAlcista, Brush colorBajista, int opacidad, int grosorBorde, bool mostrarRectanguloActivo)
+		{
+			return indicator.BricksAdvanced(input, nTicks, escape, maxRectangulos, colorAlcista, colorBajista, opacidad, grosorBorde, mostrarRectanguloActivo);
+		}
+	}
+}
+
+namespace NinjaTrader.NinjaScript.Strategies
+{
+	public partial class Strategy : NinjaTrader.Gui.NinjaScript.StrategyRenderBase
+	{
+		public Indicators.BricksAdvanced BricksAdvanced(int nTicks, int escape, int maxRectangulos, Brush colorAlcista, Brush colorBajista, int opacidad, int grosorBorde, bool mostrarRectanguloActivo)
+		{
+			return indicator.BricksAdvanced(Input, nTicks, escape, maxRectangulos, colorAlcista, colorBajista, opacidad, grosorBorde, mostrarRectanguloActivo);
+		}
+
+		public Indicators.BricksAdvanced BricksAdvanced(ISeries<double> input , int nTicks, int escape, int maxRectangulos, Brush colorAlcista, Brush colorBajista, int opacidad, int grosorBorde, bool mostrarRectanguloActivo)
+		{
+			return indicator.BricksAdvanced(input, nTicks, escape, maxRectangulos, colorAlcista, colorBajista, opacidad, grosorBorde, mostrarRectanguloActivo);
+		}
+	}
+}
+
+#endregion
